@@ -87,3 +87,85 @@ func TestPlanParsing(t *testing.T) {
 		t.Errorf("step agent = %q, want 'aws'", plan.Steps[0].Agent)
 	}
 }
+
+// TestStepDependsOn_StringCompat 驗證舊格式 "depends_on": "step_1" 能正確反序列化為 []string。
+func TestStepDependsOn_StringCompat(t *testing.T) {
+	raw := `{
+		"task_summary": "compat test",
+		"difficulty": "simple",
+		"category": "infra",
+		"steps": [
+			{"id": "step_1", "description": "first", "agent": "shell", "command": "echo 1"},
+			{"id": "step_2", "description": "second", "agent": "shell", "command": "echo 2", "depends_on": "step_1"}
+		]
+	}`
+
+	var plan Plan
+	if err := json.Unmarshal([]byte(raw), &plan); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+
+	if len(plan.Steps) != 2 {
+		t.Fatalf("expected 2 steps, got %d", len(plan.Steps))
+	}
+
+	// step_1 不應有依賴
+	if len(plan.Steps[0].DependsOn) != 0 {
+		t.Errorf("step_1 DependsOn should be empty, got %v", plan.Steps[0].DependsOn)
+	}
+
+	// step_2 的 depends_on 是舊的字串格式，應被轉為 []string{"step_1"}
+	if len(plan.Steps[1].DependsOn) != 1 || plan.Steps[1].DependsOn[0] != "step_1" {
+		t.Errorf("step_2 DependsOn: expected [step_1], got %v", plan.Steps[1].DependsOn)
+	}
+}
+
+// TestStepDependsOn_ArrayFormat 驗證新格式 "depends_on": ["step_1", "step_2"] 正常運作。
+func TestStepDependsOn_ArrayFormat(t *testing.T) {
+	raw := `{
+		"task_summary": "array test",
+		"difficulty": "moderate",
+		"category": "infra",
+		"steps": [
+			{"id": "a", "agent": "shell", "command": "echo a"},
+			{"id": "b", "agent": "shell", "command": "echo b"},
+			{"id": "c", "agent": "shell", "command": "echo c", "depends_on": ["a", "b"]}
+		]
+	}`
+
+	var plan Plan
+	if err := json.Unmarshal([]byte(raw), &plan); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+
+	step := plan.Steps[2]
+	if len(step.DependsOn) != 2 {
+		t.Fatalf("step c DependsOn length: expected 2, got %d", len(step.DependsOn))
+	}
+	if step.DependsOn[0] != "a" || step.DependsOn[1] != "b" {
+		t.Errorf("step c DependsOn: expected [a, b], got %v", step.DependsOn)
+	}
+}
+
+// TestStepDependsOn_NullAndEmpty 驗證 null 和空字串都能正確處理。
+func TestStepDependsOn_NullAndEmpty(t *testing.T) {
+	raw := `{
+		"task_summary": "null test",
+		"steps": [
+			{"id": "a", "agent": "shell", "command": "echo a", "depends_on": null},
+			{"id": "b", "agent": "shell", "command": "echo b", "depends_on": ""},
+			{"id": "c", "agent": "shell", "command": "echo c", "depends_on": []}
+		]
+	}`
+
+	var plan Plan
+	if err := json.Unmarshal([]byte(raw), &plan); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+
+	for _, step := range plan.Steps {
+		if len(step.DependsOn) != 0 {
+			t.Errorf("step %s: expected empty DependsOn, got %v", step.ID, step.DependsOn)
+		}
+	}
+}

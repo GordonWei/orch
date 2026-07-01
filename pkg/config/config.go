@@ -13,9 +13,15 @@ type Config struct {
 	LocalLLM         LocalLLM            `yaml:"local_llm"`
 	Models           []ModelDef          `yaml:"models"`
 	Memory           MemoryConfig        `yaml:"memory"`
+	Workflows        WorkflowConfig      `yaml:"workflows"`
 	Workspace        Workspace           `yaml:"workspace"`
 	Routing          map[string][]string `yaml:"routing"`
 	KeywordShortcuts []KeywordShortcut   `yaml:"keyword_shortcuts"`
+}
+
+// WorkflowConfig 定義工作流系統設定
+type WorkflowConfig struct {
+	Dir string `yaml:"dir"` // 工作流 YAML 檔案目錄，預設 ~/.config/orch/workflows/
 }
 
 type Persona struct {
@@ -93,6 +99,7 @@ func Load() *Config {
 	cfg.LocalLLM.PythonPath = expandHome(cfg.LocalLLM.PythonPath)
 	cfg.Workspace.Root = expandHome(cfg.Workspace.Root)
 	cfg.Memory.DBPath = expandHome(cfg.Memory.DBPath)
+	cfg.Workflows.Dir = expandHome(cfg.Workflows.Dir)
 	for i := range cfg.Models {
 		cfg.Models[i].PythonPath = expandHome(cfg.Models[i].PythonPath)
 	}
@@ -165,6 +172,9 @@ func defaultConfig() *Config {
 			BriefingOnBoot: true,
 			AutoSummarize:  true,
 			HistoryLimit:   0, // unlimited
+		},
+		Workflows: WorkflowConfig{
+			Dir: filepath.Join(home, ".config", "orch", "workflows"),
 		},
 		Workspace: Workspace{
 			Root: filepath.Join(home, "Desktop", "Cowork"),

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/chzyer/readline"
 	"github.com/gordonwei/orch/pkg/config"
@@ -72,6 +73,76 @@ func main() {
 	runREPL(reg, cfg, store)
 }
 
+// ===== 串流事件消費者 =====
+
+// startEventPrinter 啟動一個 goroutine，從步驟生命週期 EventChan 讀取事件並格式化輸出。
+// 回傳 WaitGroup，用來等待所有事件印完。
+func startEventPrinter(events <-chan executor.StepEvent) *sync.WaitGroup {
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	go func() {
+		defer wg.Done()
+		for ev := range events {
+			printStepEvent(ev)
+		}
+	}()
+
+	return &wg
+}
+
+// printStepEvent 格式化輸出步驟生命週期事件。
+func printStepEvent(ev executor.StepEvent) {
+	switch ev.Type {
+	case executor.EventStepStart:
+		fmt.Fprintf(os.Stderr, "⏳ [%s] Starting...\n", ev.StepID)
+	case executor.EventStepDone:
+		if ev.Result != nil {
+			fmt.Fprintf(os.Stderr, "✅ [%s] Done (%s)\n", ev.StepID, ev.Result.Took.Round(100_000_000))
+		} else {
+			fmt.Fprintf(os.Stderr, "✅ [%s] Done\n", ev.StepID)
+		}
+	case executor.EventStepFailed:
+		if ev.Result != nil && ev.Result.Err != nil {
+			fmt.Fprintf(os.Stderr, "❌ [%s] Failed: %v\n", ev.StepID, ev.Result.Err)
+		} else {
+			fmt.Fprintf(os.Stderr, "❌ [%s] Failed\n", ev.StepID)
+		}
+	case executor.EventStepSkipped:
+		fmt.Fprintf(os.Stderr, "⏭️  [%s] Skipped\n", ev.StepID)
+	case executor.EventStepCancelled:
+		fmt.Fprintf(os.Stderr, "🚫 [%s] Cancelled\n", ev.StepID)
+	}
+}
+
+// startOutputPrinter 啟動一個 goroutine，從 OutputEvents 讀取逐行輸出並格式化顯示。
+// 使用 ANSI dim 色彩與縮排，避免與主要訊息混淆。
+func startOutputPrinter(events <-chan executor.OutputEvent) *sync.WaitGroup {
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	go func() {
+		defer wg.Done()
+		for ev := range events {
+			printOutputEvent(ev)
+		}
+	}()
+
+	return &wg
+}
+
+// printOutputEvent 格式化輸出逐行串流事件。
+// 使用 step ID 前綴，方便平行執行時辨識來源。
+func printOutputEvent(ev executor.OutputEvent) {
+	switch ev.Type {
+	case executor.OutputLine:
+		// 使用 ANSI dim + 縮排，視覺上與步驟生命週期訊息區隔
+		fmt.Fprintf(os.Stderr, "\033[2m   │ [%s] %s\033[0m\n", ev.StepID, ev.Message)
+	case executor.OutputProgress:
+		fmt.Fprintf(os.Stderr, "   ⋯ [%s] %s\n", ev.StepID, ev.Message)
+	}
+}
+
 func runTask(reg *registry.Registry, cfg *config.Config, store *memory.Store, prompt string) {
 	// 1. Plan
 	fmt.Fprintf(os.Stderr, "🧠 planning...\n")
@@ -109,9 +180,20 @@ func runTask(reg *registry.Registry, cfg *config.Config, store *memory.Store, pr
 		}
 	}
 
-	// 2. Execute
+	// 2. Execute（含串流事件支援）
 	fmt.Fprintf(os.Stderr, "\n⚡ executing...\n")
+
+	// 建立步驟生命週期事件 channel（由 Executor 在 Execute 完成後關閉）
+	stepEvents := make(chan executor.StepEvent, 64)
+	stepPrinterWg := startEventPrinter(stepEvents)
+
+	// 建立逐行輸出串流事件 channel（由我們在 Execute 完成後關閉）
+	outputEvents := make(chan executor.OutputEvent, 256)
+	outputPrinterWg := startOutputPrinter(outputEvents)
+
 	e := executor.New(cfg)
+	e.EventChan = stepEvents       // 步驟生命週期事件
+	e.OutputEvents = outputEvents  // 逐行輸出串流
 
 	// 設置 re-plan callback
 	rePlanCount := 0
@@ -130,11 +212,27 @@ func runTask(reg *registry.Registry, cfg *config.Config, store *memory.Store, pr
 			return err
 		}
 		fmt.Fprintf(os.Stderr, "📝 new plan: %s (%d steps)\n", newPlan.TaskSummary, len(newPlan.Steps))
+
+		// re-plan 需要新的 EventChan（舊的已被 Execute 關閉）
+		newStepEvents := make(chan executor.StepEvent, 64)
+		newStepWg := startEventPrinter(newStepEvents)
+		e.EventChan = newStepEvents
+
 		result = e.Execute(newPlan)
+
+		// 等待新 channel 的事件印完
+		newStepWg.Wait()
 		return nil
 	})
 
 	result = e.Execute(plan)
+
+	// Execute 完成後 EventChan 已被關閉，等待 printer 印完
+	stepPrinterWg.Wait()
+
+	// 關閉 OutputEvents channel，等待 output printer 印完
+	close(outputEvents)
+	outputPrinterWg.Wait()
 
 	// 3. Report
 	fmt.Fprintf(os.Stderr, "\n")

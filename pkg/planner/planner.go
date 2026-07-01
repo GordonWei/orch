@@ -13,15 +13,57 @@ import (
 	"github.com/gordonwei/orch/pkg/registry"
 )
 
+// Step 代表一個執行計畫中的單一步驟。
+// DependsOn 支援多重依賴：步驟必須等待所有上游步驟完成後才會開始。
 type Step struct {
-	ID          string `json:"id"`
-	Description string `json:"description"`
-	Agent       string `json:"agent"`
-	Command     string `json:"command,omitempty"`
-	Prompt      string `json:"prompt,omitempty"`
-	VerifyCmd   string `json:"verify_cmd,omitempty"`
-	DependsOn   string `json:"depends_on,omitempty"`
-	OnFailure   string `json:"on_failure,omitempty"` // "retry" (default), "skip", "re-plan", "abort"
+	ID          string   `json:"id"`
+	Description string   `json:"description"`
+	Agent       string   `json:"agent"`
+	Command     string   `json:"command,omitempty"`
+	Prompt      string   `json:"prompt,omitempty"`
+	VerifyCmd   string   `json:"verify_cmd,omitempty"`
+	DependsOn   []string `json:"depends_on,omitempty"` // 上游步驟 ID 列表（支援 DAG 並行）
+	OnFailure   string   `json:"on_failure,omitempty"` // "retry" (default), "skip", "re-plan", "abort"
+}
+
+// UnmarshalJSON 提供向下相容：接受 "depends_on": "step_1" (字串) 或 ["step_1","step_2"] (陣列)。
+func (s *Step) UnmarshalJSON(data []byte) error {
+	// 使用別名避免無限遞迴
+	type stepAlias Step
+	type stepRaw struct {
+		stepAlias
+		DependsOnRaw json.RawMessage `json:"depends_on,omitempty"`
+	}
+
+	var raw stepRaw
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	*s = Step(raw.stepAlias)
+
+	if len(raw.DependsOnRaw) == 0 || string(raw.DependsOnRaw) == "null" {
+		s.DependsOn = nil
+		return nil
+	}
+
+	// 嘗試解析為字串陣列
+	var arr []string
+	if err := json.Unmarshal(raw.DependsOnRaw, &arr); err == nil {
+		s.DependsOn = arr
+		return nil
+	}
+
+	// 嘗試解析為單一字串（向下相容舊格式）
+	var single string
+	if err := json.Unmarshal(raw.DependsOnRaw, &single); err == nil {
+		if single != "" {
+			s.DependsOn = []string{single}
+		}
+		return nil
+	}
+
+	return fmt.Errorf("depends_on: expected string or []string, got %s", string(raw.DependsOnRaw))
 }
 
 type Plan struct {

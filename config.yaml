@@ -60,6 +60,11 @@ memory:
   auto_summarize: true      # 任務完成後 MLX 自動壓縮摘要寫入 briefing
   history_limit: 0          # 歷史紀錄上限（0=無限）
 
+# === 工作流模板目錄 ===
+# YAML 工作流放在此目錄，觸發詞命中時直接載入執行（跳過 AI 規劃）
+workflows:
+  dir: "~/.config/orch/workflows"
+
 workspace:
   root: "~/Desktop/Cowork"
   subdirs:
@@ -106,3 +111,11 @@ keyword_shortcuts:
     category: query
   - prefix: "gcloud container"
     category: query
+
+# === 並行執行範例（用於 YAML 工作流）===
+# depends_on 支援多上游依賴：
+#   depends_on: [step_a, step_b]  → 等 A 和 B 都完成才執行
+#   depends_on: []                → 無依賴，立即並行啟動
+#
+# 舊格式向下相容：
+#   depends_on: "step_1"          → 等同 depends_on: [step_1]
