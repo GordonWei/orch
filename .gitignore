@@ -1,0 +1,14 @@
+# Binary (root level only)
+/orch
+*.exe
+
+# OS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Test
+coverage.out

@@ -1,0 +1,108 @@
+# orch config
+# 預設路徑：~/.config/orch/config.yaml
+# 可用 ORCH_CONFIG 環境變數指定其他位置
+
+persona:
+  name: "orch"
+  owner: "Gordon Wei"
+  language: "zh-TW"
+  system_prompt: |
+    你是 orch，一個運行在 Mac 上的 AI 幕僚長 CLI 工具。
+    你的主人是 Gordon Wei（momo 基礎架構部部長）。
+    你負責協調 kiro、claude、gemini 等多個 AI agent 完成任務。
+
+    回覆規則：
+    - 一律使用繁體中文（zh-TW）回覆
+    - 簡短直接，不廢話
+    - 技術術語維持英文（Kubernetes、Terraform、GKE 等）
+    - 程式碼、指令維持英文
+
+# === 可換模型設定 ===
+# 支援 MLX、Ollama、或任何 OpenAI-compatible endpoint
+# 標記 default: true 的會作為預設模型
+models:
+  - name: "qwen-1.5b"
+    backend: "mlx"
+    endpoint: "http://localhost:8080"
+    model: "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+    python_path: "~/mlx-env/bin/python3"
+    auto_start: true
+    port: "8080"
+    default: true
+  # --- 其他可選模型（取消註解切換）---
+  # - name: "qwen-3b"
+  #   backend: "mlx"
+  #   endpoint: "http://localhost:8080"
+  #   model: "mlx-community/Qwen2.5-3B-Instruct-4bit"
+  #   python_path: "~/mlx-env/bin/python3"
+  #   auto_start: true
+  #   port: "8080"
+  #   default: false
+  # - name: "llama-8b"
+  #   backend: "ollama"
+  #   endpoint: "http://localhost:11434"
+  #   model: "llama3.1:8b"
+  #   auto_start: true
+  #   port: "11434"
+  #   default: false
+
+# === 向下相容（如果沒定義 models[] 會 fallback 到這個）===
+local_llm:
+  endpoint: "http://localhost:8080"
+  model: "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+  python_path: "~/mlx-env/bin/python3"
+  auto_start: true
+
+# === 記憶層設定 ===
+memory:
+  db_path: "~/.config/orch/orch.db"
+  briefing_on_boot: true    # 啟動時顯示上次的 briefing 摘要
+  auto_summarize: true      # 任務完成後 MLX 自動壓縮摘要寫入 briefing
+  history_limit: 0          # 歷史紀錄上限（0=無限）
+
+workspace:
+  root: "~/Desktop/Cowork"
+  subdirs:
+    - name: AWS
+      keywords: [aws, lambda, s3, ec2, sam, bedrock, cloudformation]
+    - name: GCP
+      keywords: [gcp, gke, litellm, cloud run, bigquery, gcloud]
+    - name: OnPremise
+      keywords: [on-premise, onpremise, rke2, metallb, gitea, 機房, gateway api]
+    - name: momo
+      keywords: [momo, 週報, 大促, 績效, okr, 1-on-1, 課長]
+    - name: Salesforce
+      keywords: [salesforce, 網銀, 銀行, 客戶提案, lucy]
+    - name: Study
+      keywords: [study, 筆記, 學習, orchestrator]
+
+routing:
+  kiro: [code, infra, aws, gcp, terraform, deploy, build, test, file-ops, shell]
+  claude: [notion, gcal, gmail, google-workspace, writing, analysis, meeting-notes]
+  gemini: [long-context, video, image, summarization, google-drive]
+
+keyword_shortcuts:
+  - prefix: "kubectl"
+    category: infra
+  - prefix: "terraform plan"
+    category: infra
+  - prefix: "terraform apply"
+    category: infra
+  - prefix: "tf plan"
+    category: infra
+  - prefix: "tf apply"
+    category: infra
+  - prefix: "helm upgrade"
+    category: deploy
+  - prefix: "helm install"
+    category: deploy
+  - prefix: "helm list"
+    category: deploy
+  - prefix: "aws s3"
+    category: query
+  - prefix: "aws ec2"
+    category: query
+  - prefix: "gcloud compute"
+    category: query
+  - prefix: "gcloud container"
+    category: query
