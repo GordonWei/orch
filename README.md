@@ -54,7 +54,7 @@
 ## 專案結構
 
 ```
-cmd/orch/main.go               CLI 入口（oneshot + REPL + workflow + streaming）
+cmd/orch/main.go               CLI 入口（oneshot + REPL + subcommands + streaming）
 pkg/
 ├── config/config.go           設定檔載入（YAML → struct）
 ├── model/
@@ -69,8 +69,10 @@ pkg/
 │   └── stream.go              串流輸出事件系統
 └── workflow/
     └── workflow.go            YAML 工作流模板載入與匹配
+launchd/
+└── com.orch.mlx-server.plist  macOS LaunchAgent（MLX server 自動啟動）
 config.yaml                    設定檔範本
-setup.sh                       一鍵安裝腳本
+setup.sh                       一鍵安裝腳本（含 launchd 設定）
 docs/flow.md                   Mermaid 流程圖
 ```
 
@@ -82,12 +84,33 @@ orch "查 S3 bucket 用量"
 orch "kubectl get nodes"
 orch "整理今天的會議記錄並同步 Notion"
 
+# Dry-run（只看計畫不執行）
+orch --dry-run "整合 AWS 和 GCP 用量報告"
+
+# Unix pipe 整合（stdin 自動帶入 context）
+kubectl get pods -o json | orch "哪些 pod 不健康？"
+cat error.log | orch "分析這個錯誤"
+
 # REPL 模式（持續對話）
 orch
+# REPL 內建命令：
+#   /w          列出可用工作流
+#   /w 1        執行第 1 個工作流
+#   /h          最近 10 筆歷史
+#   /b          顯示 briefing
+#   /help       列出所有命令
 
 # 觸發工作流
 orch "收工"       # 匹配 ~/.config/orch/workflows/signoff.yaml
 orch "週報"       # 匹配 ~/.config/orch/workflows/weekly.yaml
+
+# 子命令
+orch history               # 列出最近 20 筆歷史
+orch history search kubectl  # 搜尋歷史
+orch history clear         # 清除歷史
+orch briefing              # 顯示 briefing
+orch briefing gen          # MLX 自動生成 briefing
+orch briefing set "明天重點：部署 litellm"
 
 # 查看可用工具
 orch --tools
@@ -281,6 +304,17 @@ steps:
 - kiro-cli / claude CLI（AI agents）
 
 ## 版本歷史
+
+### v0.3 — Phase 3（CLI 完善 + daemon + pipe）
+
+| 功能 | 說明 |
+|------|------|
+| `orch history` 子命令 | 列出/搜尋/清除任務歷史（SQLite） |
+| `orch briefing` 子命令 | 顯示/設定/自動生成（MLX summarize）每日摘要 |
+| `--dry-run` 模式 | 只生成計畫 + ASCII DAG 圖視覺化，不執行 |
+| REPL 斜線命令 | `/w` 工作流選單、`/h` 歷史、`/b` briefing、`/help` |
+| stdin pipe 整合 | `cmd \| orch "分析"` 自動讀 stdin 作為 context |
+| MLX launchd daemon | 登入自動啟動 MLX server，零冷啟動延遲 |
 
 ### v0.2.1 — Phase 2 完成（並行執行 + 工作流 + 串流）
 

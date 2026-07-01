@@ -1,79 +1,83 @@
 #!/bin/bash
-# orch setup — 新機器前置安裝腳本
-# 適用 macOS (Apple Silicon)
-set -e
+set -euo pipefail
 
-echo "🔧 orch setup — 安裝前置環境"
-echo ""
+# Parse flags
+NO_DAEMON=false
+for arg in "$@"; do
+  case "$arg" in
+    --no-daemon) NO_DAEMON=true ;;
+    --help|-h)
+      echo "Usage: ./setup.sh [--no-daemon]"
+      echo "  --no-daemon  Skip launchd daemon installation"
+      exit 0
+      ;;
+  esac
+done
 
-# 1. Go
-if ! command -v go &>/dev/null; then
-    echo "📦 安裝 Go..."
-    brew install go
-else
-    echo "✅ Go $(go version | awk '{print $3}')"
+STEPS=5
+if [ "$NO_DAEMON" = true ]; then
+  STEPS=4
 fi
 
-# 2. MLX LM（用於本地推理 server）
-MLX_ENV="$HOME/mlx-env"
-if [ ! -f "$MLX_ENV/bin/python3" ]; then
-    echo "📦 建立 MLX Python venv..."
-    python3 -m venv "$MLX_ENV"
-    source "$MLX_ENV/bin/activate"
-    pip install --quiet mlx-lm
-    deactivate
+echo "=== orch setup ==="
+
+# 1. Go binary
+echo "[1/$STEPS] Building orch binary..."
+go build -o ~/go/bin/orch ./cmd/orch/
+echo "   ✅ ~/go/bin/orch"
+
+# 2. Config
+echo "[2/$STEPS] Setting up config..."
+CONFIG_DIR="$HOME/.config/orch"
+mkdir -p "$CONFIG_DIR"
+if [ ! -f "$CONFIG_DIR/config.yaml" ]; then
+  cp config.yaml "$CONFIG_DIR/config.yaml"
+  echo "   ✅ config copied to $CONFIG_DIR/config.yaml"
 else
-    echo "✅ MLX venv ($MLX_ENV)"
+  echo "   ⏭️  config already exists, skipping"
 fi
 
-# 3. 下載模型
-MODEL="mlx-community/Qwen2.5-3B-Instruct-4bit"
-echo "📦 確認 MLX 模型 ($MODEL)..."
-source "$MLX_ENV/bin/activate"
-python3 -c "
-from mlx_lm import load
-load('$MODEL')
-print('  ✅ model ready')
-" 2>/dev/null
-deactivate
+# 3. MLX env
+if [ ! -d "$HOME/mlx-env" ]; then
+  echo "[3/$STEPS] Setting up MLX environment..."
+  python3 -m venv "$HOME/mlx-env"
+  "$HOME/mlx-env/bin/pip" install mlx-lm
+  echo "   ✅ ~/mlx-env ready"
+else
+  echo "   ⏭️  ~/mlx-env already exists"
+fi
 
-# 4. Build orch
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-echo "📦 Build orch..."
-cd "$SCRIPT_DIR"
-go build -o orch ./cmd/orch/
+# 4. Pre-download model
+echo "[4/$STEPS] Pre-downloading model (if needed)..."
+"$HOME/mlx-env/bin/python3" -c "from mlx_lm import load; load('mlx-community/Qwen2.5-1.5B-Instruct-4bit')" 2>/dev/null || true
+echo "   ✅ model cached"
 
-# 5. 安裝到 PATH
-INSTALL_DIR="$HOME/go/bin"
-mkdir -p "$INSTALL_DIR"
-cp orch "$INSTALL_DIR/orch"
-rm -f orch
-echo "✅ orch 安裝至 $INSTALL_DIR/orch"
+# 5. LaunchAgent (MLX server daemon)
+if [ "$NO_DAEMON" = false ]; then
+  echo "[5/$STEPS] Installing MLX server LaunchAgent..."
+  LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
+  PLIST_NAME="com.orch.mlx-server.plist"
+  PLIST_SRC="./launchd/$PLIST_NAME"
+  PLIST_DEST="$LAUNCH_AGENTS_DIR/$PLIST_NAME"
 
-# 6. 建立 mlx server 啟動腳本
-MLX_SERVER="$INSTALL_DIR/orch-server"
-cat > "$MLX_SERVER" << EOF
-#!/bin/bash
-source "$MLX_ENV/bin/activate"
-exec mlx_lm.server --model "$MODEL" --port 8080
-EOF
-chmod +x "$MLX_SERVER"
-echo "✅ orch-server 安裝至 $MLX_SERVER"
+  mkdir -p "$LAUNCH_AGENTS_DIR"
+
+  # Replace ~/mlx-env path with actual $HOME expansion in plist
+  sed "s|/Users/wei|$HOME|g" "$PLIST_SRC" > "$PLIST_DEST"
+
+  # Unload first if already loaded (ignore errors)
+  launchctl unload "$PLIST_DEST" 2>/dev/null || true
+
+  # Load the agent
+  launchctl load "$PLIST_DEST"
+  echo "   ✅ LaunchAgent installed and loaded"
+  echo "   📋 Log: ~/Library/Logs/orch-mlx.log"
+  echo "   🔧 Manage: launchctl unload ~/Library/LaunchAgents/$PLIST_NAME"
+fi
 
 echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "🏁 安裝完成！"
-echo ""
-echo "使用方式："
-echo "  1. 先啟動本地 LLM server："
-echo "     orch-server"
-echo ""
-echo "  2. 然後用 orch："
-echo "     orch \"你的任務\"     # oneshot"
-echo "     orch               # REPL"
-echo "     orch --tools       # 查看可用工具"
-echo ""
-echo "前提："
-echo "  - ~/go/bin 在 PATH 中"
-echo "  - 確保 kiro-cli / claude 等 agent 已安裝"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "=== setup complete ==="
+echo "Run: orch \"hello\""
+if [ "$NO_DAEMON" = false ]; then
+  echo "MLX server running on http://localhost:8080 (auto-restarts on crash)"
+fi
