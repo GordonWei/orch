@@ -1,14 +1,27 @@
-# Binary (root level only)
+# Binary
 /orch
 *.exe
 
 # OS
 .DS_Store
+Thumbs.db
 
 # IDE
 .idea/
 .vscode/
 *.swp
+*.swo
+*~
 
-# Test
+# Test / Build artifacts
 coverage.out
+coverage.html
+*.test
+
+# Runtime data
+*.db
+*.log
+
+# Environment
+.env
+.envrc
