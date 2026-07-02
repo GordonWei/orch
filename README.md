@@ -43,6 +43,93 @@ User Input
 └─────────────────────────────────────┘
 ```
 
+## Design Philosophy: Lightweight Router vs Heavy Framework
+
+Projects like [ORCH](https://github.com/oxgeneral/ORCH) (TypeScript) take a **monolithic** approach: the framework itself manages agents, defines roles, tracks state machines, handles inter-agent messaging, and isolates work via git worktrees. It's an "AI company simulator" — you set a goal, deploy a team of 5 agents, go to sleep, and wake up to pull requests.
+
+Our orch takes the **microservices** approach: each AI CLI (kiro, claude, gemini) is already a fully capable agent with its own skills, tools, and domain knowledge. orch is just the **API gateway** — it routes, dispatches, and chains results.
+
+```
+ORCH (TypeScript):
+  Heavy framework → manages everything internally
+  Agent intelligence lives inside ORCH's role prompts
+  Good for: overnight autonomous runs, multi-agent code generation
+
+Our orch (Go):
+  Lightweight router → each endpoint is self-contained
+  Agent intelligence lives in each CLI's own config (CLAUDE.md, .kiro/steering/)
+  Good for: daily CLI workflow, local-first, cost-efficient
+```
+
+### Why this works in practice
+
+If you've already invested in configuring your AI CLIs — giving them personas, skills, MCP tool connections, routing rules — then you don't need a heavy framework re-implementing all that. You need a dispatcher that knows **which tool to call** and **how to chain their outputs**.
+
+| ORCH concept | Our equivalent |
+|-------------|----------------|
+| Agent + Role definition | `CLAUDE.md` / `.kiro/steering/` persona & rules |
+| Agent skills | MCP tools (Notion, GCal, AWS), built-in skills |
+| Team template | Agent routing table in steering config |
+| Inter-agent messaging | Shared `_agent_handoff.md` + DAG output chaining |
+| State machine | Workflow YAML + handoff protocol |
+| CTO task decomposition | orch planner (MLX → DAG plan) |
+
+### When to use which
+
+| Scenario | Better choice |
+|----------|--------------|
+| "Build an entire SaaS overnight with 5 agents" | ORCH (TypeScript) |
+| "I have kiro + claude configured with MCP tools, just route my daily tasks" | orch (this project) |
+| "Run agents 24/7 on a server, zero human intervention" | ORCH (headless daemon) |
+| "Quick local inference, pipe-friendly, $0/day for routine work" | orch (MLX Layer 2) |
+
+## Real-World Use Case
+
+This is how orch is actually used in a multi-AI workspace with kiro-cli and claude (Victoria):
+
+```
+┌─────────────────────────────────────────────────────┐
+│  orch (Go binary — router + MLX local inference)     │
+└───────────┬─────────────────────────┬───────────────┘
+            │                         │
+            ▼                         ▼
+┌───────────────────────┐   ┌───────────────────────────┐
+│  kiro-cli             │   │  claude -p (Victoria)      │
+│  ├─ .kiro/steering/   │   │  ├─ CLAUDE.md persona      │
+│  │  ├─ agent-registry │   │  │  ├─ Sub Agent routing   │
+│  │  ├─ global-rules   │   │  │  ├─ 3-layer handoff     │
+│  │  └─ handoff proto  │   │  │  └─ Notion/GCal skills  │
+│  ├─ AWS/GCP/infra ops │   │  ├─ MCP: Notion, Gmail     │
+│  └─ code gen, terraform│   │  └─ meeting notes, writing │
+└───────────────────────┘   └───────────────────────────┘
+```
+
+### Daily workflow
+
+```bash
+# Morning: orch routes to MLX for quick tasks
+orch "kubectl get pods"              # Layer 1: keyword → shell direct
+orch "昨天那個 PR 改了什麼"           # Layer 2: MLX answers locally
+
+# Complex: falls through to cloud backend
+orch "幫我整理今天三場會議記錄到 Notion"  # Layer 3: → claude (has Notion MCP)
+orch "terraform plan for litellm-gke"    # Layer 3: → kiro (has AWS/GCP skills)
+
+# Workflow: pre-defined DAG, no AI planning needed
+orch "signoff"                           # YAML workflow: kiro handoff → claude Notion sync
+```
+
+### Cost profile
+
+| Usage pattern | Daily cost |
+|---------------|-----------|
+| 80% routine (keyword + MLX) | $0 |
+| 15% moderate (single cloud call) | ~$0.50 |
+| 5% complex (multi-step DAG) | ~$1-2 |
+| **vs. ORCH with 5 agents** | **$4-20/run** |
+
+The key insight: most daily work is simple enough for a 1.5B parameter model running locally. You only pay for cloud when you genuinely need it.
+
 ## Requirements
 
 | Requirement | Why |
