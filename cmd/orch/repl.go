@@ -1,0 +1,274 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+
+	"github.com/chzyer/readline"
+	"github.com/gordonwei/orch/pkg/config"
+	"github.com/gordonwei/orch/pkg/executor"
+	"github.com/gordonwei/orch/pkg/memory"
+	"github.com/gordonwei/orch/pkg/registry"
+	"github.com/gordonwei/orch/pkg/workflow"
+)
+
+func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store) {
+	rl, err := readline.NewEx(&readline.Config{
+		Prompt:          "› ",
+		HistoryFile:     os.Getenv("HOME") + "/.orch_history",
+		InterruptPrompt: "^C",
+		EOFPrompt:       "exit",
+		Stdin:           os.Stdin,
+		Stdout:          os.Stderr,
+		Stderr:          os.Stderr,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "readline init failed: %v\n", err)
+		return
+	}
+	defer rl.Close()
+
+	fmt.Fprintf(rl.Stdout(), "🟢 orch %s — AI 幕僚長\n", version)
+	fmt.Fprintf(rl.Stdout(), "   tools: %s\n", toolNames(reg))
+	fmt.Fprintf(rl.Stdout(), "   type your request, /help for commands, ctrl+d to quit\n\n")
+
+	for {
+		line, err := rl.Readline()
+		if err == readline.ErrInterrupt {
+			continue
+		}
+		if err != nil {
+			break
+		}
+		input := strings.TrimSpace(line)
+		if input == "" {
+			continue
+		}
+		if input == "exit" || input == "quit" || input == "q" {
+			break
+		}
+		if input == "tools" {
+			fmt.Println(reg.ToJSON())
+			continue
+		}
+
+		// Slash command
+		if strings.HasPrefix(input, "/") {
+			handleSlashCommand(rl, reg, cfg, store, input)
+			continue
+		}
+
+		runTask(nil, reg, cfg, store, input, false)
+		fmt.Fprintln(os.Stderr)
+	}
+
+	fmt.Fprintln(os.Stderr, "👋 bye")
+}
+
+// ===== REPL Slash Commands =====
+
+func handleSlashCommand(rl *readline.Instance, reg *registry.Registry, cfg *config.Config, store *memory.Store, input string) {
+	parts := strings.Fields(input)
+	cmd := strings.ToLower(parts[0])
+	args := parts[1:]
+
+	switch cmd {
+	case "/help":
+		printREPLHelp()
+
+	case "/w", "/workflows":
+		if len(args) > 0 {
+			handleWorkflowExec(rl, reg, cfg, store, args[0])
+		} else {
+			handleWorkflowMenu(rl, reg, cfg, store)
+		}
+
+	case "/h", "/history":
+		replHistory(store)
+
+	case "/b", "/briefing":
+		replBriefing(store)
+
+	default:
+		fmt.Fprintf(os.Stderr, "❓ 未知命令: %s（輸入 /help 查看可用命令）\n", cmd)
+	}
+}
+
+func printREPLHelp() {
+	fmt.Fprintf(os.Stderr, `
+📖 REPL 命令：
+  /w, /workflows     — 列出所有可用工作流
+  /w <number>        — 執行指定編號的工作流
+  /h, /history       — 列出最近 10 筆歷史
+  /b, /briefing      — 顯示當前 briefing
+  /help              — 列出所有 REPL 命令
+  tools              — 列出已註冊工具
+  exit, quit, q      — 離開
+
+`)
+}
+
+func handleWorkflowMenu(rl *readline.Instance, reg *registry.Registry, cfg *config.Config, store *memory.Store) {
+	workflows, err := workflow.LoadAll(cfg.Workflows.Dir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ 載入工作流失敗: %v\n", err)
+		return
+	}
+	if len(workflows) == 0 {
+		fmt.Fprintf(os.Stderr, "📋 目前沒有可用工作流（目錄: %s）\n", cfg.Workflows.Dir)
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "📋 可用工作流：\n")
+	for i, w := range workflows {
+		fmt.Fprintf(os.Stderr, "  [%d] %s — %s\n", i+1, w.Name, w.Description)
+	}
+	fmt.Fprintf(os.Stderr, "\n輸入編號執行，或按 Enter 取消：")
+
+	oldPrompt := rl.Config.Prompt
+	rl.SetPrompt("")
+	choice, err := rl.Readline()
+	rl.SetPrompt(oldPrompt)
+
+	if err != nil {
+		return
+	}
+
+	choice = strings.TrimSpace(choice)
+	if choice == "" {
+		fmt.Fprintf(os.Stderr, "（已取消）\n")
+		return
+	}
+
+	handleWorkflowExec(rl, reg, cfg, store, choice)
+}
+
+func handleWorkflowExec(rl *readline.Instance, reg *registry.Registry, cfg *config.Config, store *memory.Store, numStr string) {
+	idx, err := strconv.Atoi(numStr)
+	if err != nil || idx < 1 {
+		fmt.Fprintf(os.Stderr, "❌ 無效的工作流編號: %s\n", numStr)
+		return
+	}
+
+	workflows, err := workflow.LoadAll(cfg.Workflows.Dir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ 載入工作流失敗: %v\n", err)
+		return
+	}
+
+	if idx > len(workflows) {
+		fmt.Fprintf(os.Stderr, "❌ 工作流編號 %d 不存在（共 %d 個）\n", idx, len(workflows))
+		return
+	}
+
+	selected := &workflows[idx-1]
+	fmt.Fprintf(os.Stderr, "🚀 執行工作流: %s\n", selected.Name)
+
+	plan := workflow.ToPlanner(selected, nil, cfg)
+
+	fmt.Fprintf(os.Stderr, "📝 %s\n", plan.TaskSummary)
+	fmt.Fprintf(os.Stderr, "   difficulty: %s | category: %s | steps: %d\n",
+		plan.Difficulty, plan.Category, len(plan.Steps))
+	fmt.Fprintf(os.Stderr, "\n⚡ executing...\n")
+
+	stepEvents := make(chan executor.StepEvent, 64)
+	stepPrinterWg := startEventPrinter(stepEvents)
+
+	outputEvents := make(chan executor.OutputEvent, 256)
+	outputPrinterWg := startOutputPrinter(outputEvents)
+
+	e := executor.New(cfg)
+	e.EventChan = stepEvents
+	e.OutputEvents = outputEvents
+
+	result := e.Execute(plan)
+
+	stepPrinterWg.Wait()
+	close(outputEvents)
+	outputPrinterWg.Wait()
+
+	fmt.Fprintf(os.Stderr, "\n")
+	if result.Success {
+		fmt.Fprintf(os.Stderr, "🏁 workflow complete (%s)\n", result.Took.Round(100_000_000))
+		if len(result.Steps) > 0 {
+			last := result.Steps[len(result.Steps)-1]
+			if last.Output != "" {
+				fmt.Print(last.Output)
+			}
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "💀 workflow failed after %s\n", result.Took.Round(100_000_000))
+		if result.Err != nil {
+			fmt.Fprintf(os.Stderr, "   error: %v\n", result.Err)
+		}
+		for _, s := range result.Steps {
+			if s.Err != nil {
+				fmt.Fprintf(os.Stderr, "   failed at [%s]: %v\n", s.StepID, s.Err)
+			}
+		}
+	}
+
+	if store != nil {
+		var outputSummary string
+		if len(result.Steps) > 0 {
+			last := result.Steps[len(result.Steps)-1]
+			outputSummary = truncateStr(last.Output, 500)
+		}
+		store.AddHistory(memory.HistoryEntry{
+			Input:         fmt.Sprintf("[workflow] %s", selected.Name),
+			Category:      "workflow",
+			Agent:         "workflow",
+			OutputSummary: outputSummary,
+			Success:       result.Success,
+			Tags:          []string{"workflow", selected.Name},
+			TookMs:        result.Took.Milliseconds(),
+		})
+	}
+
+	fmt.Fprintln(os.Stderr)
+}
+
+func replHistory(store *memory.Store) {
+	if store == nil {
+		fmt.Fprintf(os.Stderr, "⚠️  memory store 未啟用\n")
+		return
+	}
+
+	entries, err := store.RecentHistory(10)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ 讀取歷史失敗: %v\n", err)
+		return
+	}
+	if len(entries) == 0 {
+		fmt.Fprintf(os.Stderr, "📜 尚無歷史紀錄\n")
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "📜 最近 %d 筆歷史：\n", len(entries))
+	for _, e := range entries {
+		status := "✅"
+		if !e.Success {
+			status = "❌"
+		}
+		summary := truncateStr(e.Input, 60)
+		fmt.Fprintf(os.Stderr, "  %s [%s] %s — %s\n", status, e.Timestamp, e.Category, summary)
+	}
+	fmt.Fprintln(os.Stderr)
+}
+
+func replBriefing(store *memory.Store) {
+	if store == nil {
+		fmt.Fprintf(os.Stderr, "⚠️  memory store 未啟用\n")
+		return
+	}
+
+	brief, t, err := store.GetBriefing()
+	if err != nil || brief == "" {
+		fmt.Fprintf(os.Stderr, "📋 目前沒有 briefing（使用 orch briefing gen 產生）\n")
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "📋 briefing (generated %s):\n   %s\n\n", t.Format("01/02 15:04"), brief)
+}

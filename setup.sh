@@ -23,8 +23,9 @@ echo "=== orch setup ==="
 
 # 1. Go binary
 echo "[1/$STEPS] Building orch binary..."
-go build -o ~/go/bin/orch ./cmd/orch/
-echo "   ✅ ~/go/bin/orch"
+VERSION="${ORCH_VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo "dev")}"
+go build -ldflags "-X main.version=${VERSION}" -o ~/go/bin/orch ./cmd/orch/
+echo "   ✅ ~/go/bin/orch (${VERSION})"
 
 # 2. Config
 echo "[2/$STEPS] Setting up config..."
@@ -62,8 +63,8 @@ if [ "$NO_DAEMON" = false ]; then
 
   mkdir -p "$LAUNCH_AGENTS_DIR"
 
-  # Replace ~/mlx-env path with actual $HOME expansion in plist
-  sed "s|/Users/wei|$HOME|g" "$PLIST_SRC" > "$PLIST_DEST"
+  # Replace __HOME__ placeholder with actual $HOME path
+  sed "s|__HOME__|$HOME|g" "$PLIST_SRC" > "$PLIST_DEST"
 
   # Unload first if already loaded (ignore errors)
   launchctl unload "$PLIST_DEST" 2>/dev/null || true

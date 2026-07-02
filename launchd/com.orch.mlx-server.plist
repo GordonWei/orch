@@ -7,7 +7,7 @@
 
 	<key>ProgramArguments</key>
 	<array>
-		<string>/Users/wei/mlx-env/bin/python3</string>
+		<string>__HOME__/mlx-env/bin/python3</string>
 		<string>-m</string>
 		<string>mlx_lm.server</string>
 		<string>--model</string>
@@ -32,10 +32,10 @@
 	<string>/tmp</string>
 
 	<key>StandardOutPath</key>
-	<string>/Users/wei/Library/Logs/orch-mlx.log</string>
+	<string>__HOME__/Library/Logs/orch-mlx.log</string>
 
 	<key>StandardErrorPath</key>
-	<string>/Users/wei/Library/Logs/orch-mlx.log</string>
+	<string>__HOME__/Library/Logs/orch-mlx.log</string>
 
 	<key>ThrottleInterval</key>
 	<integer>5</integer>

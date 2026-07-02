@@ -120,7 +120,7 @@ func (p *Planner) tryKeywordPlan(input string) *Plan {
 	lower := strings.ToLower(input)
 
 	for _, sc := range p.cfg.KeywordShortcuts {
-		if strings.Contains(lower, strings.ToLower(sc.Prefix)) {
+		if strings.HasPrefix(lower, strings.ToLower(sc.Prefix)) {
 			return &Plan{
 				TaskSummary: input,
 				Difficulty:  "simple",
