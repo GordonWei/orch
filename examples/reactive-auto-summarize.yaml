@@ -1,0 +1,20 @@
+# Auto-summarize long outputs via local MLX
+# When any step produces a large output, generate a one-line summary for the briefing.
+name: "auto-summarize"
+mode: "reactive"
+triggers:
+  - name: "summarize-for-briefing"
+    on: "step.done"
+    condition: "category != chat"
+    then:
+      agent: "local"
+      prompt: |
+        Summarize the following task output in one sentence (max 100 words).
+        This will be used for the daily briefing.
+
+        Task completed by: {{.Agent}}
+        Category: {{.Category}}
+        Output:
+        {{.Output}}
+      summarize: true
+      max_context: 2000

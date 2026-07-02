@@ -12,6 +12,7 @@ import (
 
 	"github.com/gordonwei/orch/pkg/backend"
 	"github.com/gordonwei/orch/pkg/config"
+	"github.com/gordonwei/orch/pkg/eventbus"
 	"github.com/gordonwei/orch/pkg/executor"
 	"github.com/gordonwei/orch/pkg/memory"
 	"github.com/gordonwei/orch/pkg/model"
@@ -140,7 +141,18 @@ func main() {
 	}
 
 	if prompt != "" {
-		runTask(ctx, reg, cfg, store, br, prompt, args.dryRun)
+		// Load reactive trigger rules
+		rules, err := eventbus.LoadRules(cfg.Workflows.Dir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "⚠️  reactive rules load failed: %v\n", err)
+		}
+		var bus *eventbus.Bus
+		if len(rules) > 0 {
+			bus = eventbus.New(rules)
+			fmt.Fprintf(os.Stderr, "🔗 reactive rules: %d loaded\n", len(rules))
+		}
+
+		runTask(ctx, reg, cfg, store, br, bus, prompt, args.dryRun)
 		return
 	}
 
@@ -150,7 +162,14 @@ func main() {
 		return
 	}
 
-	runREPL(reg, cfg, store, br)
+	// Load reactive trigger rules for REPL
+	replRules, _ := eventbus.LoadRules(cfg.Workflows.Dir)
+	var replBus *eventbus.Bus
+	if len(replRules) > 0 {
+		replBus = eventbus.New(replRules)
+	}
+
+	runREPL(reg, cfg, store, br, replBus)
 }
 
 // ===== Subcommand Handlers =====
@@ -336,7 +355,7 @@ Output only the briefing text, no titles or formatting.`, sb.String())
 
 // ===== Task Execution =====
 
-func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry, prompt string, dryRun bool) {
+func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry, bus *eventbus.Bus, prompt string, dryRun bool) {
 	// 1. Plan
 	fmt.Fprintf(os.Stderr, "🧠 planning...\n")
 	p := planner.New(reg, cfg, br)
@@ -471,6 +490,118 @@ func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, st
 	if !result.Success {
 		os.Exit(1)
 	}
+
+	// 5. Event Bus — check trigger rules for reactive chaining
+	if bus != nil && bus.HasRules() && result.Success {
+		// Get MLX client for gate/summarize (if available)
+		activeModel := cfg.ActiveModel()
+		llmClient := model.NewOpenAIClient(model.OpenAIClientConfig{
+			Endpoint: activeModel.Endpoint,
+			Model:    activeModel.Model,
+			Backend:  activeModel.Backend,
+		})
+		mlxAvailable := llmClient.Available()
+
+		for _, stepResult := range result.Steps {
+			if stepResult.Err != nil {
+				continue
+			}
+
+			// Prepare output (apply truncation/summarization)
+			output := stepResult.Output
+
+			event := eventbus.Event{
+				Type:     "step.done",
+				Agent:    stepResult.Agent,
+				Category: plan.Category,
+				StepID:   stepResult.StepID,
+				Output:   output,
+				Tags:     []string{plan.Category, plan.Difficulty},
+			}
+
+			actions, err := bus.Process(event)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "⚠️  eventbus error: %v\n", err)
+				continue
+			}
+
+			for _, action := range actions {
+				rule := findRule(bus, action.RuleName)
+
+				// MLX Gate: ask local model if this trigger is worth dispatching
+				if rule != nil && rule.Then.GateWithMLX && mlxAvailable {
+					gatePrompt := fmt.Sprintf("Should this task be dispatched to a cloud AI? Answer YES or NO only.\nTask: %s\nContext: %s",
+						action.Prompt, truncateStr(output, 500))
+					gateResp, err := llmClient.Chat([]model.Message{
+						{Role: "system", Content: "You are a gate keeper. Answer only YES or NO."},
+						{Role: "user", Content: gatePrompt},
+					}, &model.ChatOptions{MaxTokens: 10, Temperature: 0.0})
+					if err == nil && !strings.Contains(strings.ToUpper(gateResp), "YES") {
+						fmt.Fprintf(os.Stderr, "\n🚫 gate blocked: %s (MLX said no)\n", action.RuleName)
+						continue
+					}
+				}
+
+				// Output summarization: compress large output before passing downstream
+				chainPrompt := action.Prompt
+				if rule != nil && rule.Then.Summarize && mlxAvailable && len(output) > 1000 {
+					fmt.Fprintf(os.Stderr, "\n📝 summarizing output (%d chars → MLX)...\n", len(output))
+					summary, err := llmClient.Chat([]model.Message{
+						{Role: "system", Content: "Summarize the following text concisely. Keep key facts, remove verbosity."},
+						{Role: "user", Content: output},
+					}, &model.ChatOptions{MaxTokens: 512, Temperature: 0.1})
+					if err == nil && summary != "" {
+						// Re-render prompt with summarized output
+						summarizedEvent := event
+						summarizedEvent.Output = summary
+						if newActions, err := bus.Process(summarizedEvent); err == nil {
+							for _, na := range newActions {
+								if na.RuleName == action.RuleName {
+									chainPrompt = na.Prompt
+									break
+								}
+							}
+						}
+					}
+				}
+
+				// MaxContext truncation
+				if rule != nil && rule.Then.MaxContext > 0 {
+					chainPrompt = eventbus.TruncateOutput(chainPrompt, rule.Then.MaxContext)
+				}
+
+				fmt.Fprintf(os.Stderr, "\n🔗 trigger: %s → %s\n", action.RuleName, action.Agent)
+
+				// Resolve backend for the triggered action
+				b := br.Resolve(action.Agent)
+				if b == nil {
+					fmt.Fprintf(os.Stderr, "   ⚠️  no backend for %q, skipping\n", action.Agent)
+					continue
+				}
+
+				// Execute the triggered action
+				chainOutput, err := b.Execute(chainPrompt, "")
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "   ❌ chain failed: %v\n", err)
+				} else {
+					fmt.Fprintf(os.Stderr, "   ✅ chain complete\n")
+					if chainOutput != "" {
+						fmt.Print(chainOutput)
+					}
+				}
+			}
+		}
+	}
+}
+
+// findRule looks up a rule by name in the bus.
+func findRule(bus *eventbus.Bus, name string) *eventbus.TriggerRule {
+	for _, r := range bus.Rules() {
+		if r.Name == name {
+			return &r
+		}
+	}
+	return nil
 }
 
 // ===== Arg Parsing =====

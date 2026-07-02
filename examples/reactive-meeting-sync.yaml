@@ -1,0 +1,18 @@
+# Auto-push meeting notes to Notion
+# When any agent completes a meeting-related task, sync to Notion via claude.
+name: "meeting-sync"
+mode: "reactive"
+triggers:
+  - name: "push-meeting-to-notion"
+    on: "step.done"
+    condition: "category == meeting"
+    then:
+      agent: "claude"
+      prompt: |
+        Sync the following meeting summary to the appropriate Notion page:
+
+        {{.Output}}
+
+        Create a new sub-page under the correct meeting folder with today's date.
+      max_context: 8000
+      gate_with_mlx: true

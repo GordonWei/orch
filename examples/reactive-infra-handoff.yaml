@@ -1,0 +1,19 @@
+# Auto-sync infra work to handoff notes
+# When kiro completes an infra task, automatically ask claude to update the handoff table.
+name: "infra-handoff"
+mode: "reactive"
+triggers:
+  - name: "sync-infra-to-handoff"
+    on: "step.done"
+    agent: "kiro"
+    condition: "category == infra"
+    then:
+      agent: "claude"
+      prompt: |
+        Update the _agent_handoff.md file with the following infra work that was just completed:
+
+        {{.Output}}
+
+        Add it to the "Kiro 已完成" section with today's date.
+      max_context: 4000
+      summarize: true

@@ -9,13 +9,14 @@ import (
 	"github.com/chzyer/readline"
 	"github.com/gordonwei/orch/pkg/backend"
 	"github.com/gordonwei/orch/pkg/config"
+	"github.com/gordonwei/orch/pkg/eventbus"
 	"github.com/gordonwei/orch/pkg/executor"
 	"github.com/gordonwei/orch/pkg/memory"
 	"github.com/gordonwei/orch/pkg/registry"
 	"github.com/gordonwei/orch/pkg/workflow"
 )
 
-func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry) {
+func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry, bus *eventbus.Bus) {
 	rl, err := readline.NewEx(&readline.Config{
 		Prompt:          "› ",
 		HistoryFile:     os.Getenv("HOME") + "/.orch_history",
@@ -61,7 +62,7 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br
 			continue
 		}
 
-		runTask(nil, reg, cfg, store, br, input, false)
+		runTask(nil, reg, cfg, store, br, bus, input, false)
 		fmt.Fprintln(os.Stderr)
 	}
 
