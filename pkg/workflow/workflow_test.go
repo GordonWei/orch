@@ -9,45 +9,45 @@ import (
 	"github.com/gordonwei/orch/pkg/config"
 )
 
-// testWorkflowYAML 測試用的工作流 YAML 範本
+// testWorkflowYAML is a test workflow YAML template
 const testWorkflowYAML = `name: "收工"
-description: "執行收工流程：交接表更新 + Notion 同步"
+description: "signoff workflow: update handoff + sync Notion"
 trigger: "收工"
 variables:
   project: "Cowork"
 steps:
   - id: step_1
-    description: "更新本地交接表"
+    description: "update local handoff"
     agent: kiro
-    prompt: "讀取 docs/_agent_handoff.md，更新今日完成項目（{{.date}}）"
+    prompt: "read docs/_agent_handoff.md, update completed items for {{.date}}"
   - id: step_2
-    description: "同步 Notion"
+    description: "sync Notion"
     agent: claude
-    prompt: "將交接表同步至 Notion 全局看板，專案：{{.project}}"
+    prompt: "sync handoff to Notion global board, project: {{.project}}"
     depends_on: [step_1]
 `
 
 const testWorkflowYAML2 = `name: "開工"
-description: "執行開工流程：讀取交接表"
+description: "boot workflow: read handoff"
 trigger: "開工"
 steps:
   - id: step_1
-    description: "讀取交接表"
+    description: "read handoff"
     agent: kiro
-    prompt: "讀取 docs/_agent_handoff.md，回報待辦項目"
+    prompt: "read docs/_agent_handoff.md, report pending items"
 `
 
-// TestLoadAll 測試從目錄載入所有工作流
+// TestLoadAll tests loading all workflows from directory
 func TestLoadAll(t *testing.T) {
-	// 建立暫存目錄
+	// Create temp directory
 	tmpDir := t.TempDir()
 
-	// 寫入測試檔案
+	// Write test files
 	os.WriteFile(filepath.Join(tmpDir, "offwork.yaml"), []byte(testWorkflowYAML), 0644)
 	os.WriteFile(filepath.Join(tmpDir, "onwork.yml"), []byte(testWorkflowYAML2), 0644)
 	os.WriteFile(filepath.Join(tmpDir, "readme.txt"), []byte("not a workflow"), 0644)
 
-	// 載入
+	// Load
 	workflows, err := LoadAll(tmpDir)
 	if err != nil {
 		t.Fatalf("LoadAll failed: %v", err)
@@ -57,7 +57,7 @@ func TestLoadAll(t *testing.T) {
 		t.Fatalf("expected 2 workflows, got %d", len(workflows))
 	}
 
-	// 檢查第一個工作流的基本屬性
+	// Check first workflow basic properties
 	found := false
 	for _, w := range workflows {
 		if w.Name == "收工" {
@@ -78,7 +78,7 @@ func TestLoadAll(t *testing.T) {
 	}
 }
 
-// TestLoadAll_EmptyDir 測試空目錄
+// TestLoadAll_EmptyDir tests empty directory
 func TestLoadAll_EmptyDir(t *testing.T) {
 	tmpDir := t.TempDir()
 	workflows, err := LoadAll(tmpDir)
@@ -90,7 +90,7 @@ func TestLoadAll_EmptyDir(t *testing.T) {
 	}
 }
 
-// TestLoadAll_NonExistentDir 測試不存在的目錄（不報錯）
+// TestLoadAll_NonExistentDir tests non-existent directory (no error)
 func TestLoadAll_NonExistentDir(t *testing.T) {
 	workflows, err := LoadAll("/non/existent/path")
 	if err != nil {
@@ -101,7 +101,7 @@ func TestLoadAll_NonExistentDir(t *testing.T) {
 	}
 }
 
-// TestLoadAll_InvalidYAML 測試格式錯誤的 YAML（跳過，不報錯）
+// TestLoadAll_InvalidYAML tests invalid YAML (skipped, no error)
 func TestLoadAll_InvalidYAML(t *testing.T) {
 	tmpDir := t.TempDir()
 	os.WriteFile(filepath.Join(tmpDir, "broken.yaml"), []byte("{{invalid yaml:::"), 0644)
@@ -111,13 +111,13 @@ func TestLoadAll_InvalidYAML(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadAll failed: %v", err)
 	}
-	// 只載入有效的那一個
+	// Only the valid one is loaded
 	if len(workflows) != 1 {
 		t.Errorf("expected 1 valid workflow, got %d", len(workflows))
 	}
 }
 
-// TestMatch 測試觸發詞比對
+// TestMatch tests trigger keyword matching
 func TestMatch(t *testing.T) {
 	workflows := []Workflow{
 		{Name: "收工", Trigger: "收工", Steps: []WorkflowStep{{ID: "s1", Agent: "kiro"}}},
@@ -127,7 +127,7 @@ func TestMatch(t *testing.T) {
 
 	tests := []struct {
 		input    string
-		expected string // 期望匹配的 workflow name，"" 表示 nil
+		expected string // expected matching workflow name, "" means nil
 	}{
 		{"收工", "收工"},
 		{"我要收工了", "收工"},
@@ -156,7 +156,7 @@ func TestMatch(t *testing.T) {
 	}
 }
 
-// TestMatch_CaseInsensitive 測試大小寫不敏感
+// TestMatch_CaseInsensitive tests case insensitivity
 func TestMatch_CaseInsensitive(t *testing.T) {
 	workflows := []Workflow{
 		{Name: "Deploy", Trigger: "DEPLOY", Steps: []WorkflowStep{{ID: "s1", Agent: "shell"}}},
@@ -171,11 +171,11 @@ func TestMatch_CaseInsensitive(t *testing.T) {
 	}
 }
 
-// TestToPlanner 測試轉換為 planner.Plan
+// TestToPlanner tests conversion to planner.Plan
 func TestToPlanner(t *testing.T) {
 	w := &Workflow{
 		Name:        "收工",
-		Description: "執行收工流程",
+		Description: "execute signoff workflow",
 		Trigger:     "收工",
 		Variables: map[string]string{
 			"project": "Cowork",
@@ -183,15 +183,15 @@ func TestToPlanner(t *testing.T) {
 		Steps: []WorkflowStep{
 			{
 				ID:          "step_1",
-				Description: "更新交接表（{{.date}}）",
+				Description: "update handoff ({{.date}})",
 				Agent:       "kiro",
-				Prompt:      "更新 {{.project}} 的交接表，日期 {{.date}}，使用者 {{.user}}",
+				Prompt:      "update {{.project}} handoff, date {{.date}}, user {{.user}}",
 			},
 			{
 				ID:          "step_2",
-				Description: "同步 Notion",
+				Description: "sync Notion",
 				Agent:       "claude",
-				Prompt:      "同步 Notion",
+				Prompt:      "sync Notion",
 				DependsOn:   []string{"step_1"},
 			},
 		},
@@ -203,16 +203,16 @@ func TestToPlanner(t *testing.T) {
 		},
 	}
 
-	// 使用者覆蓋 project 變數
+	// User overrides project variable
 	vars := map[string]string{
 		"project": "AWS",
 	}
 
 	plan := ToPlanner(w, vars, cfg)
 
-	// 基本屬性
-	if plan.TaskSummary != "執行收工流程" {
-		t.Errorf("expected task_summary '執行收工流程', got '%s'", plan.TaskSummary)
+	// Basic properties
+	if plan.TaskSummary != "execute signoff workflow" {
+		t.Errorf("expected task_summary 'execute signoff workflow', got '%s'", plan.TaskSummary)
 	}
 	if plan.Difficulty != "workflow" {
 		t.Errorf("expected difficulty 'workflow', got '%s'", plan.Difficulty)
@@ -224,32 +224,32 @@ func TestToPlanner(t *testing.T) {
 		t.Fatalf("expected 2 steps, got %d", len(plan.Steps))
 	}
 
-	// Step 1: 模板替換
+	// Step 1: template substitution
 	step1 := plan.Steps[0]
 	if step1.Agent != "kiro" {
 		t.Errorf("step1 agent: expected 'kiro', got '%s'", step1.Agent)
 	}
-	// 使用者覆蓋的 project 應該是 "AWS"
+	// User-overridden project should be "AWS"
 	if !strings.Contains(step1.Prompt, "AWS") {
 		t.Errorf("step1 prompt should contain 'AWS' (user override), got '%s'", step1.Prompt)
 	}
-	// {{.user}} 應被替換為 Gordon Wei
+	// {{.user}} should be replaced with Gordon Wei
 	if !strings.Contains(step1.Prompt, "Gordon Wei") {
 		t.Errorf("step1 prompt should contain 'Gordon Wei', got '%s'", step1.Prompt)
 	}
-	// {{.date}} 應被替換（不再包含 {{）
+	// {{.date}} should be replaced (no longer contains {{)
 	if strings.Contains(step1.Prompt, "{{") {
 		t.Errorf("step1 prompt still has template syntax: '%s'", step1.Prompt)
 	}
 
-	// Step 2: depends_on 轉換
+	// Step 2: depends_on conversion
 	step2 := plan.Steps[1]
 	if len(step2.DependsOn) != 1 || step2.DependsOn[0] != "step_1" {
 		t.Errorf("step2 depends_on: expected [step_1], got %v", step2.DependsOn)
 	}
 }
 
-// TestToPlanner_MultipleDependsOn 測試多重依賴轉換
+// TestToPlanner_MultipleDependsOn tests multiple dependency conversion
 func TestToPlanner_MultipleDependsOn(t *testing.T) {
 	w := &Workflow{
 		Name:        "test",
@@ -270,7 +270,7 @@ func TestToPlanner_MultipleDependsOn(t *testing.T) {
 	}
 }
 
-// TestRenderTemplate 測試模板渲染
+// TestRenderTemplate tests template rendering
 func TestRenderTemplate(t *testing.T) {
 	vars := map[string]string{
 		"date":    "2026-07-02",
@@ -297,17 +297,17 @@ func TestRenderTemplate(t *testing.T) {
 	}
 }
 
-// TestRenderTemplate_InvalidTemplate 測試無效模板（回傳原文）
+// TestRenderTemplate_InvalidTemplate tests invalid template (returns original)
 func TestRenderTemplate_InvalidTemplate(t *testing.T) {
 	vars := map[string]string{"x": "1"}
-	// 不完整的模板語法
+	// Incomplete template syntax
 	result := renderTemplate("{{.missing_var}}", vars)
-	// Go template 對 map 未定義 key 會輸出 <no value>，不會出錯
-	// 但格式錯誤的語法會原樣回傳
-	_ = result // 不 panic 即通過
+	// Go template outputs <no value> for undefined map keys without error
+	// But malformed syntax returns original string
+	_ = result // passes as long as it does not panic
 }
 
-// TestBuiltinVars 測試內建變數
+// TestBuiltinVars tests built-in variables
 func TestBuiltinVars(t *testing.T) {
 	cfg := &config.Config{
 		Persona: config.Persona{
@@ -328,7 +328,7 @@ func TestBuiltinVars(t *testing.T) {
 	}
 }
 
-// TestBuiltinVars_NilConfig 測試 config 為 nil
+// TestBuiltinVars_NilConfig tests nil config
 func TestBuiltinVars_NilConfig(t *testing.T) {
 	vars := builtinVars(nil)
 

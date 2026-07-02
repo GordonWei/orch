@@ -139,12 +139,12 @@ type toolDef struct {
 }
 
 func detectModel(cmd []string) string {
-	// 讀 config 檔偵測模型，不呼叫 CLI（避免 CLI 把指令當 prompt）
+	// Read config to detect model, don't call CLI (avoid CLI treating command as prompt)
 	switch cmd[0] {
 	case "claude":
 		return readJSONField(os.Getenv("HOME")+"/.claude/settings.json", "model")
 	case "kiro-cli":
-		// kiro model 由 server 動態選擇
+		// kiro model is dynamically selected by server
 		return "auto"
 	}
 	return ""

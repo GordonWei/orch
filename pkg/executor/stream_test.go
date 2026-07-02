@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// TestStreamWriter_BasicWrite 測試基本寫入：inner writer 收到完整資料，events 收到逐行事件
+// TestStreamWriter_BasicWrite tests basic write: inner writer gets full data, events get line-by-line
 func TestStreamWriter_BasicWrite(t *testing.T) {
 	var buf bytes.Buffer
 	events := make(chan OutputEvent, 100)
@@ -24,12 +24,12 @@ func TestStreamWriter_BasicWrite(t *testing.T) {
 		t.Fatalf("expected %d bytes written, got %d", len(input), n)
 	}
 
-	// 驗證 inner writer 收到完整資料
+	// Verify inner writer received complete data
 	if buf.String() != input {
 		t.Fatalf("inner buffer mismatch: got %q, want %q", buf.String(), input)
 	}
 
-	// 驗證收到 3 個 OutputLine 事件
+	// Verify 3 OutputLine events received
 	close(events)
 	var received []OutputEvent
 	for ev := range events {
@@ -57,34 +57,34 @@ func TestStreamWriter_BasicWrite(t *testing.T) {
 	}
 }
 
-// TestStreamWriter_PartialLine 測試不完整行：Flush 時才發送最後一段
+// TestStreamWriter_PartialLine tests partial line: last segment sent on Flush
 func TestStreamWriter_PartialLine(t *testing.T) {
 	var buf bytes.Buffer
 	events := make(chan OutputEvent, 100)
 
 	sw := NewStreamWriter(&buf, events, "step_2")
 
-	// 寫入沒有換行的資料
+	// Write data without newline
 	sw.Write([]byte("partial"))
 
-	// 此時不應該有事件
+	// Should be no events at this point
 	select {
 	case ev := <-events:
 		t.Fatalf("unexpected event before flush: %+v", ev)
 	default:
-		// 正確：沒有事件
+		// Correct: no events
 	}
 
-	// 繼續寫入含換行的資料
+	// Continue writing data with newline
 	sw.Write([]byte(" data\nline2"))
 
-	// 應該收到一個事件（"partial data"）
+	// Should receive one event ("partial data")
 	ev := <-events
 	if ev.Message != "partial data" {
 		t.Fatalf("expected 'partial data', got %q", ev.Message)
 	}
 
-	// "line2" 還在 buffer 中
+	// "line2" is still in buffer
 	sw.Flush()
 
 	ev = <-events
@@ -92,13 +92,13 @@ func TestStreamWriter_PartialLine(t *testing.T) {
 		t.Fatalf("expected 'line2' after flush, got %q", ev.Message)
 	}
 
-	// 驗證 inner buffer 完整
+	// Verify inner buffer is complete
 	if buf.String() != "partial data\nline2" {
 		t.Fatalf("inner buffer: got %q", buf.String())
 	}
 }
 
-// TestStreamWriter_NilEvents 測試 events 為 nil 時不 panic，僅寫入 inner
+// TestStreamWriter_NilEvents tests no panic when events is nil, only writes to inner
 func TestStreamWriter_NilEvents(t *testing.T) {
 	var buf bytes.Buffer
 	sw := NewStreamWriter(&buf, nil, "step_3")
@@ -115,11 +115,11 @@ func TestStreamWriter_NilEvents(t *testing.T) {
 		t.Fatalf("inner buffer mismatch")
 	}
 
-	// Flush 也不應該 panic
+	// Flush should also not panic
 	sw.Flush()
 }
 
-// TestStreamWriter_ConcurrentWrite 測試多個 goroutine 同時寫入的安全性
+// TestStreamWriter_ConcurrentWrite tests concurrent write safety from multiple goroutines
 func TestStreamWriter_ConcurrentWrite(t *testing.T) {
 	var buf bytes.Buffer
 	events := make(chan OutputEvent, 1000)
@@ -144,7 +144,7 @@ func TestStreamWriter_ConcurrentWrite(t *testing.T) {
 	sw.Flush()
 	close(events)
 
-	// 驗證收到正確數量的事件
+	// Verify correct number of events received
 	count := 0
 	for range events {
 		count++
@@ -156,7 +156,7 @@ func TestStreamWriter_ConcurrentWrite(t *testing.T) {
 	}
 }
 
-// TestStreamReader_Basic 測試 StreamReader 逐行讀取並發送事件
+// TestStreamReader_Basic tests StreamReader reading line by line and sending events
 func TestStreamReader_Basic(t *testing.T) {
 	input := "line_a\nline_b\nline_c\n"
 	reader := strings.NewReader(input)
@@ -170,12 +170,12 @@ func TestStreamReader_Basic(t *testing.T) {
 
 	close(events)
 
-	// 驗證 writer 收到完整內容
+	// Verify writer received complete content
 	if writer.String() != input {
 		t.Fatalf("writer mismatch: got %q, want %q", writer.String(), input)
 	}
 
-	// 驗證事件
+	// Verify events
 	var received []OutputEvent
 	for ev := range events {
 		received = append(received, ev)
@@ -193,7 +193,7 @@ func TestStreamReader_Basic(t *testing.T) {
 	}
 }
 
-// TestStreamReader_NilEvents 測試 StreamReader 在 events 為 nil 時仍正常寫入 writer
+// TestStreamReader_NilEvents tests StreamReader still writes to writer when events is nil
 func TestStreamReader_NilEvents(t *testing.T) {
 	input := "hello\nworld\n"
 	reader := strings.NewReader(input)
@@ -209,13 +209,13 @@ func TestStreamReader_NilEvents(t *testing.T) {
 	}
 }
 
-// TestEmitProgress_Nil 測試 EmitProgress 在 nil channel 時不 panic
+// TestEmitProgress_Nil tests EmitProgress does not panic with nil channel
 func TestEmitProgress_Nil(t *testing.T) {
-	// 不應該 panic
+	// Should not panic
 	EmitProgress(nil, "step_x", "hello")
 }
 
-// TestEmitProgress_Send 測試 EmitProgress 正常發送
+// TestEmitProgress_Send tests EmitProgress normal send
 func TestEmitProgress_Send(t *testing.T) {
 	events := make(chan OutputEvent, 10)
 	EmitProgress(events, "step_y", "working...")
@@ -239,7 +239,7 @@ func TestEmitProgress_Send(t *testing.T) {
 	}
 }
 
-// TestOutputEventTypes 驗證 OutputEventType 常數值正確
+// TestOutputEventTypes verifies OutputEventType constant values
 func TestOutputEventTypes(t *testing.T) {
 	if string(OutputLine) != "output" {
 		t.Errorf("OutputLine: got %q, want 'output'", OutputLine)
@@ -249,14 +249,14 @@ func TestOutputEventTypes(t *testing.T) {
 	}
 }
 
-// TestStreamWriter_WithOutputEvents 整合測試：模擬 executor 使用 StreamWriter 串流 shell 輸出
+// TestStreamWriter_WithOutputEvents integration test: simulate executor streaming shell output
 func TestStreamWriter_WithOutputEvents(t *testing.T) {
 	outputEvents := make(chan OutputEvent, 100)
 	var buf bytes.Buffer
 
 	sw := NewStreamWriter(&buf, outputEvents, "shell_step")
 
-	// 模擬 shell 指令逐步輸出
+	// Simulate shell command incremental output
 	sw.Write([]byte("compiling...\n"))
 	sw.Write([]byte("linking...\n"))
 	sw.Write([]byte("done!\n"))
@@ -279,7 +279,7 @@ func TestStreamWriter_WithOutputEvents(t *testing.T) {
 		}
 	}
 
-	// 確認 buf 有完整輸出
+	// Confirm buf has complete output
 	if buf.String() != "compiling...\nlinking...\ndone!\n" {
 		t.Fatalf("buffer mismatch: %q", buf.String())
 	}

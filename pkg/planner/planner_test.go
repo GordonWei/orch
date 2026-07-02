@@ -49,7 +49,7 @@ func TestExtractJSON_WithSurroundingText(t *testing.T) {
 
 func TestPlanParsing(t *testing.T) {
 	raw := `{
-		"task_summary": "查 S3 bucket",
+		"task_summary": "check S3 bucket",
 		"difficulty": "simple",
 		"category": "query",
 		"steps": [
@@ -67,15 +67,15 @@ func TestPlanParsing(t *testing.T) {
 		t.Fatal("extractJSON returned empty")
 	}
 
-	// 驗證能正確 unmarshal
+	// Verify correct unmarshal
 	var plan Plan
 	err := unmarshalPlan(result, &plan)
 	if err != nil {
 		t.Fatalf("unmarshal failed: %v", err)
 	}
 
-	if plan.TaskSummary != "查 S3 bucket" {
-		t.Errorf("task_summary = %q, want '查 S3 bucket'", plan.TaskSummary)
+	if plan.TaskSummary != "check S3 bucket" {
+		t.Errorf("task_summary = %q, want 'check S3 bucket'", plan.TaskSummary)
 	}
 	if plan.Difficulty != "simple" {
 		t.Errorf("difficulty = %q, want 'simple'", plan.Difficulty)
@@ -88,7 +88,7 @@ func TestPlanParsing(t *testing.T) {
 	}
 }
 
-// TestStepDependsOn_StringCompat 驗證舊格式 "depends_on": "step_1" 能正確反序列化為 []string。
+// TestStepDependsOn_StringCompat verifies old format "depends_on": "step_1" correctly deserializes to []string.
 func TestStepDependsOn_StringCompat(t *testing.T) {
 	raw := `{
 		"task_summary": "compat test",
@@ -109,18 +109,18 @@ func TestStepDependsOn_StringCompat(t *testing.T) {
 		t.Fatalf("expected 2 steps, got %d", len(plan.Steps))
 	}
 
-	// step_1 不應有依賴
+	// step_1 should have no dependencies
 	if len(plan.Steps[0].DependsOn) != 0 {
 		t.Errorf("step_1 DependsOn should be empty, got %v", plan.Steps[0].DependsOn)
 	}
 
-	// step_2 的 depends_on 是舊的字串格式，應被轉為 []string{"step_1"}
+	// step_2 has old string format depends_on, should be converted to []string{"step_1"}
 	if len(plan.Steps[1].DependsOn) != 1 || plan.Steps[1].DependsOn[0] != "step_1" {
 		t.Errorf("step_2 DependsOn: expected [step_1], got %v", plan.Steps[1].DependsOn)
 	}
 }
 
-// TestStepDependsOn_ArrayFormat 驗證新格式 "depends_on": ["step_1", "step_2"] 正常運作。
+// TestStepDependsOn_ArrayFormat verifies new format "depends_on": ["step_1", "step_2"] works correctly.
 func TestStepDependsOn_ArrayFormat(t *testing.T) {
 	raw := `{
 		"task_summary": "array test",
@@ -147,7 +147,7 @@ func TestStepDependsOn_ArrayFormat(t *testing.T) {
 	}
 }
 
-// TestStepDependsOn_NullAndEmpty 驗證 null 和空字串都能正確處理。
+// TestStepDependsOn_NullAndEmpty verifies null and empty string are handled correctly.
 func TestStepDependsOn_NullAndEmpty(t *testing.T) {
 	raw := `{
 		"task_summary": "null test",

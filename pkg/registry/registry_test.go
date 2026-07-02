@@ -11,8 +11,8 @@ func TestScan(t *testing.T) {
 		t.Fatal("expected at least some tools defined")
 	}
 
-	// 至少應該有一些工具是 available 的（本機有 bash）
-	// 但具體哪些可用取決於環境，所以只檢查結構
+	// At least some tools should be available (local machine has bash)
+	// But which ones are available depends on environment, so only check structure
 	for _, tool := range reg.Tools {
 		if tool.Name == "" {
 			t.Error("tool with empty name")
@@ -62,7 +62,7 @@ func TestSummary(t *testing.T) {
 }
 
 func TestReadJSONField(t *testing.T) {
-	// 測試不存在的檔案
+	// Test non-existent file
 	result := readJSONField("/nonexistent/path.json", "model")
 	if result != "" {
 		t.Errorf("expected empty for nonexistent file, got %q", result)

@@ -30,7 +30,7 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store) {
 	}
 	defer rl.Close()
 
-	fmt.Fprintf(rl.Stdout(), "🟢 orch %s — AI 幕僚長\n", version)
+	fmt.Fprintf(rl.Stdout(), "🟢 orch %s — AI Chief of Staff\n", version)
 	fmt.Fprintf(rl.Stdout(), "   tools: %s\n", toolNames(reg))
 	fmt.Fprintf(rl.Stdout(), "   type your request, /help for commands, ctrl+d to quit\n\n")
 
@@ -92,20 +92,20 @@ func handleSlashCommand(rl *readline.Instance, reg *registry.Registry, cfg *conf
 		replBriefing(store)
 
 	default:
-		fmt.Fprintf(os.Stderr, "❓ 未知命令: %s（輸入 /help 查看可用命令）\n", cmd)
+		fmt.Fprintf(os.Stderr, "❓ unknown command: %s (type /help for available commands)\n", cmd)
 	}
 }
 
 func printREPLHelp() {
 	fmt.Fprintf(os.Stderr, `
-📖 REPL 命令：
-  /w, /workflows     — 列出所有可用工作流
-  /w <number>        — 執行指定編號的工作流
-  /h, /history       — 列出最近 10 筆歷史
-  /b, /briefing      — 顯示當前 briefing
-  /help              — 列出所有 REPL 命令
-  tools              — 列出已註冊工具
-  exit, quit, q      — 離開
+📖 REPL Commands:
+  /w, /workflows     — list all available workflows
+  /w <number>        — execute workflow by number
+  /h, /history       — last 10 history entries
+  /b, /briefing      — show current briefing
+  /help              — show this help
+  tools              — list registered tools
+  exit, quit, q      — exit
 
 `)
 }
@@ -113,19 +113,19 @@ func printREPLHelp() {
 func handleWorkflowMenu(rl *readline.Instance, reg *registry.Registry, cfg *config.Config, store *memory.Store) {
 	workflows, err := workflow.LoadAll(cfg.Workflows.Dir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ 載入工作流失敗: %v\n", err)
+		fmt.Fprintf(os.Stderr, "❌ failed to load workflows: %v\n", err)
 		return
 	}
 	if len(workflows) == 0 {
-		fmt.Fprintf(os.Stderr, "📋 目前沒有可用工作流（目錄: %s）\n", cfg.Workflows.Dir)
+		fmt.Fprintf(os.Stderr, "📋 no workflows available (dir: %s)\n", cfg.Workflows.Dir)
 		return
 	}
 
-	fmt.Fprintf(os.Stderr, "📋 可用工作流：\n")
+	fmt.Fprintf(os.Stderr, "📋 Available workflows:\n")
 	for i, w := range workflows {
 		fmt.Fprintf(os.Stderr, "  [%d] %s — %s\n", i+1, w.Name, w.Description)
 	}
-	fmt.Fprintf(os.Stderr, "\n輸入編號執行，或按 Enter 取消：")
+	fmt.Fprintf(os.Stderr, "\nEnter number to execute, or press Enter to cancel: ")
 
 	oldPrompt := rl.Config.Prompt
 	rl.SetPrompt("")
@@ -138,7 +138,7 @@ func handleWorkflowMenu(rl *readline.Instance, reg *registry.Registry, cfg *conf
 
 	choice = strings.TrimSpace(choice)
 	if choice == "" {
-		fmt.Fprintf(os.Stderr, "（已取消）\n")
+		fmt.Fprintf(os.Stderr, "(cancelled)\n")
 		return
 	}
 
@@ -148,23 +148,23 @@ func handleWorkflowMenu(rl *readline.Instance, reg *registry.Registry, cfg *conf
 func handleWorkflowExec(rl *readline.Instance, reg *registry.Registry, cfg *config.Config, store *memory.Store, numStr string) {
 	idx, err := strconv.Atoi(numStr)
 	if err != nil || idx < 1 {
-		fmt.Fprintf(os.Stderr, "❌ 無效的工作流編號: %s\n", numStr)
+		fmt.Fprintf(os.Stderr, "❌ invalid workflow number: %s\n", numStr)
 		return
 	}
 
 	workflows, err := workflow.LoadAll(cfg.Workflows.Dir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ 載入工作流失敗: %v\n", err)
+		fmt.Fprintf(os.Stderr, "❌ failed to load workflows: %v\n", err)
 		return
 	}
 
 	if idx > len(workflows) {
-		fmt.Fprintf(os.Stderr, "❌ 工作流編號 %d 不存在（共 %d 個）\n", idx, len(workflows))
+		fmt.Fprintf(os.Stderr, "❌ workflow #%d does not exist (total: %d)\n", idx, len(workflows))
 		return
 	}
 
 	selected := &workflows[idx-1]
-	fmt.Fprintf(os.Stderr, "🚀 執行工作流: %s\n", selected.Name)
+	fmt.Fprintf(os.Stderr, "🚀 executing workflow: %s\n", selected.Name)
 
 	plan := workflow.ToPlanner(selected, nil, cfg)
 
@@ -232,21 +232,21 @@ func handleWorkflowExec(rl *readline.Instance, reg *registry.Registry, cfg *conf
 
 func replHistory(store *memory.Store) {
 	if store == nil {
-		fmt.Fprintf(os.Stderr, "⚠️  memory store 未啟用\n")
+		fmt.Fprintf(os.Stderr, "⚠️  memory store not available\n")
 		return
 	}
 
 	entries, err := store.RecentHistory(10)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ 讀取歷史失敗: %v\n", err)
+		fmt.Fprintf(os.Stderr, "❌ failed to read history: %v\n", err)
 		return
 	}
 	if len(entries) == 0 {
-		fmt.Fprintf(os.Stderr, "📜 尚無歷史紀錄\n")
+		fmt.Fprintf(os.Stderr, "📜 no history entries\n")
 		return
 	}
 
-	fmt.Fprintf(os.Stderr, "📜 最近 %d 筆歷史：\n", len(entries))
+	fmt.Fprintf(os.Stderr, "📜 last %d history entries:\n", len(entries))
 	for _, e := range entries {
 		status := "✅"
 		if !e.Success {
@@ -260,13 +260,13 @@ func replHistory(store *memory.Store) {
 
 func replBriefing(store *memory.Store) {
 	if store == nil {
-		fmt.Fprintf(os.Stderr, "⚠️  memory store 未啟用\n")
+		fmt.Fprintf(os.Stderr, "⚠️  memory store not available\n")
 		return
 	}
 
 	brief, t, err := store.GetBriefing()
 	if err != nil || brief == "" {
-		fmt.Fprintf(os.Stderr, "📋 目前沒有 briefing（使用 orch briefing gen 產生）\n")
+		fmt.Fprintf(os.Stderr, "📋 no briefing available (use `orch briefing gen` to generate)\n")
 		return
 	}
 

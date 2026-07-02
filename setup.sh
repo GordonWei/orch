@@ -45,7 +45,7 @@ if [ ! -d "$HOME/mlx-env" ]; then
   "$HOME/mlx-env/bin/pip" install mlx-lm
   echo "   ✅ ~/mlx-env ready"
 else
-  echo "   ⏭️  ~/mlx-env already exists"
+  echo "[3/$STEPS] ⏭️  ~/mlx-env already exists"
 fi
 
 # 4. Pre-download model

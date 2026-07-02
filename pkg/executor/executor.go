@@ -1,8 +1,8 @@
-// Package executor 提供並行 DAG 執行引擎。
+// Package executor provides a parallel DAG execution engine.
 //
-// 步驟依照 DependsOn 欄位形成有向無環圖（DAG），
-// 無依賴的步驟會立即以 goroutine 並行啟動，
-// 有依賴的步驟則等待所有上游步驟成功完成後再開始。
+// Steps follow the DependsOn field to form a directed acyclic graph (DAG).
+// Steps with no dependencies start immediately as goroutines in parallel.
+// Steps with dependencies wait for all upstream steps to succeed before starting.
 package executor
 
 import (
@@ -20,7 +20,7 @@ import (
 	"github.com/gordonwei/orch/pkg/planner"
 )
 
-// StepResult 記錄單一步驟的執行結果。
+// StepResult records a single step's execution result.
 type StepResult struct {
 	StepID      string
 	Description string
@@ -33,7 +33,7 @@ type StepResult struct {
 	KV          map[string]string // structured key-value data for downstream steps
 }
 
-// Result 記錄整個 Plan 的執行結果。
+// Result records the execution result of an entire Plan.
 type Result struct {
 	Steps       []StepResult
 	Success     bool
@@ -42,35 +42,35 @@ type Result struct {
 	RePlanCount int
 }
 
-// ===== 步驟生命週期事件（EventChan） =====
+// ===== Step Lifecycle Events (EventChan) =====
 
-// EventType 定義步驟生命週期事件的類別。
+// EventType defines the type of step lifecycle events.
 type EventType int
 
 const (
-	// EventStepStart 步驟開始執行。
+	// EventStepStart — step starts execution.
 	EventStepStart EventType = iota
-	// EventStepDone 步驟執行完成（成功）。
+	// EventStepDone — step execution complete (success).
 	EventStepDone
-	// EventStepFailed 步驟執行失敗。
+	// EventStepFailed — step execution failed.
 	EventStepFailed
-	// EventStepSkipped 因上游失敗且策略為 skip，步驟被跳過但下游可繼續。
+	// EventStepSkipped — upstream failed with skip policy; step skipped but downstream can continue.
 	EventStepSkipped
-	// EventStepCancelled 因上游失敗且策略為 abort，步驟被取消。
+	// EventStepCancelled — upstream failed with abort policy; step cancelled.
 	EventStepCancelled
 )
 
-// StepEvent 是透過 EventChan 發送的步驟生命週期事件。
+// StepEvent is a step lifecycle event sent via EventChan.
 type StepEvent struct {
 	Type   EventType
 	StepID string
-	Result *StepResult // EventStepDone / EventStepFailed 時填入
-	Err    error       // EventStepCancelled 時的取消原因
+	Result *StepResult // populated for EventStepDone / EventStepFailed
+	Err    error       // cancellation reason for EventStepCancelled
 }
 
 // ===== Executor =====
 
-// Executor 是並行 DAG 執行引擎。
+// Executor is the parallel DAG execution engine.
 type Executor struct {
 	timeout    time.Duration
 	maxRetries int
@@ -78,17 +78,17 @@ type Executor struct {
 	cfg        *config.Config
 	rePlanFunc func(failedContext string) error // callback to trigger re-plan
 
-	// EventChan 若設定（非 nil），執行過程中會發送步驟生命週期事件（start/done/failed）。
-	// 使用者需在呼叫 Execute() 前建立 channel，Execute() 完成後會關閉它。
+	// EventChan, if set (non-nil), emits step lifecycle events (start/done/failed) during execution.
+	// The caller must create the channel before calling Execute(); Execute() closes it when done.
 	EventChan chan StepEvent
 
-	// OutputEvents 若設定（非 nil），shell 指令會逐行串流 stdout，
-	// AI agent 呼叫則定期發送 progress 事件。
-	// 此 channel 不由 Executor 關閉——由呼叫端負責管理生命週期。
+	// OutputEvents, if set (non-nil), streams stdout line-by-line for shell commands
+	// and emits periodic progress events for AI agent calls.
+	// This channel is NOT closed by Executor — the caller manages its lifecycle.
 	OutputEvents chan<- OutputEvent
 }
 
-// New 建立新的 Executor 實例。
+// New creates a new Executor instance.
 func New(cfg *config.Config) *Executor {
 	return &Executor{
 		timeout:    10 * time.Minute,
@@ -98,36 +98,36 @@ func New(cfg *config.Config) *Executor {
 	}
 }
 
-// SetRePlanFunc 設定步驟失敗後觸發重新規劃的回呼函式。
-// 當步驟的 on_failure=re-plan 時，此函式會被呼叫並傳入失敗上下文。
+// SetRePlanFunc sets the callback for re-planning when a step fails.
+// When a step's on_failure=re-plan, this function is called with the failure context.
 func (e *Executor) SetRePlanFunc(fn func(failedContext string) error) {
 	e.rePlanFunc = fn
 }
 
-// emit 安全地發送步驟生命週期事件到 EventChan（若已設定）。
+// emit safely sends a step lifecycle event to EventChan (if set).
 func (e *Executor) emit(ev StepEvent) {
 	if e.EventChan != nil {
 		e.EventChan <- ev
 	}
 }
 
-// ===== DAG 建構與驗證 =====
+// ===== DAG Construction and Validation =====
 
-// dagNode 代表 DAG 中的一個節點，包含步驟本身與依賴關係。
+// dagNode represents a node in the DAG, containing the step and its dependency relationships.
 type dagNode struct {
 	step        planner.Step
-	upstreams   []string // 此步驟依賴的上游步驟 ID
-	downstreams []string // 依賴此步驟的下游步驟 ID
+	upstreams   []string // upstream step IDs this step depends on
+	downstreams []string // downstream step IDs that depend on this step
 }
 
-// buildDAG 從步驟清單建構 DAG 圖並驗證。
+// buildDAG builds and validates a DAG from the step list.
 func buildDAG(steps []planner.Step) (map[string]*dagNode, error) {
 	nodes := make(map[string]*dagNode, len(steps))
 
-	// 建立所有節點
+	// Create all nodes
 	for _, step := range steps {
 		if _, exists := nodes[step.ID]; exists {
-			return nil, fmt.Errorf("重複的步驟 ID: %q", step.ID)
+			return nil, fmt.Errorf("duplicate step ID: %q", step.ID)
 		}
 		nodes[step.ID] = &dagNode{
 			step:      step,
@@ -135,18 +135,18 @@ func buildDAG(steps []planner.Step) (map[string]*dagNode, error) {
 		}
 	}
 
-	// 驗證依賴是否存在，並建立 downstream 指標
+	// Verify dependencies exist and build downstream pointers
 	for id, node := range nodes {
 		for _, dep := range node.upstreams {
 			upstream, exists := nodes[dep]
 			if !exists {
-				return nil, fmt.Errorf("步驟 %q 依賴不存在的步驟 %q", id, dep)
+				return nil, fmt.Errorf("step %q depends on non-existent step %q", id, dep)
 			}
 			upstream.downstreams = append(upstream.downstreams, id)
 		}
 	}
 
-	// 循環偵測（DFS）
+	// Cycle detection (DFS)
 	if err := detectCycle(nodes); err != nil {
 		return nil, err
 	}
@@ -154,12 +154,12 @@ func buildDAG(steps []planner.Step) (map[string]*dagNode, error) {
 	return nodes, nil
 }
 
-// detectCycle 使用 DFS 三色標記法偵測 DAG 中的循環依賴。
+// detectCycle detects cycles in the DAG using DFS three-color marking.
 func detectCycle(nodes map[string]*dagNode) error {
 	const (
-		white = 0 // 未造訪
-		gray  = 1 // 造訪中（在當前 DFS 路徑上）
-		black = 2 // 已完成
+		white = 0 // unvisited
+		gray  = 1 // visiting (on current DFS path)
+		black = 2 // completed
 	)
 
 	color := make(map[string]int, len(nodes))
@@ -173,7 +173,7 @@ func detectCycle(nodes map[string]*dagNode) error {
 		for _, downstream := range nodes[id].downstreams {
 			switch color[downstream] {
 			case gray:
-				return fmt.Errorf("偵測到循環依賴：%s → %s", id, downstream)
+				return fmt.Errorf("cycle detected: %s → %s", id, downstream)
 			case white:
 				if err := dfs(downstream); err != nil {
 					return err
@@ -194,21 +194,22 @@ func detectCycle(nodes map[string]*dagNode) error {
 	return nil
 }
 
-// ===== 並行 DAG 執行引擎 =====
+// ===== Parallel DAG Execution Engine =====
 
-// Execute 執行計畫中的所有步驟，以 DAG 並行方式排程。
+// Execute executes all steps in the plan, scheduled with DAG parallelism.
 //
-// 無依賴的步驟會立即並行啟動；有依賴的步驟會等到所有上游成功後才開始。
-// 若 EventChan 已設定，會在開始前發送事件，執行完畢後關閉 channel。
+// Steps with no dependencies start immediately in parallel; steps with dependencies
+// wait until all upstream steps succeed before starting.
+// If EventChan is set, events are emitted during execution and the channel is closed when done.
 func (e *Executor) Execute(plan *planner.Plan) Result {
 	start := time.Now()
 
-	// 若有 EventChan，結束後關閉
+	// Close EventChan when done (if set)
 	if e.EventChan != nil {
 		defer close(e.EventChan)
 	}
 
-	// 建構 DAG
+	// Build DAG
 	nodes, err := buildDAG(plan.Steps)
 	if err != nil {
 		return Result{
@@ -219,25 +220,25 @@ func (e *Executor) Execute(plan *planner.Plan) Result {
 		}
 	}
 
-	// 執行環境
+	// Execution context
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	var (
 		mu         sync.Mutex
 		results    = make(map[string]*StepResult)
-		completed  = make(map[string]chan struct{}) // 每個步驟完成時關閉
+		completed  = make(map[string]chan struct{}) // closed when each step completes
 		wg         sync.WaitGroup
 		globalErr  error
 		rePlanFlag bool
 	)
 
-	// 為每個步驟建立完成信號 channel
+	// Create completion signal channel for each step
 	for id := range nodes {
 		completed[id] = make(chan struct{})
 	}
 
-	// buildContext 收集所有上游步驟的輸出，組成此步驟的先驗上下文。
+	// buildContext collects output from all upstream steps to compose prior context for this step.
 	buildContext := func(deps []string) string {
 		mu.Lock()
 		defer mu.Unlock()
@@ -267,20 +268,20 @@ func (e *Executor) Execute(plan *planner.Plan) Result {
 		return buf.String()
 	}
 
-	// 啟動每個步驟的 goroutine
+	// Launch goroutine for each step
 	for _, node := range nodes {
 		wg.Add(1)
 		go func(n *dagNode) {
 			defer wg.Done()
 			defer close(completed[n.step.ID])
 
-			// 等待所有上游步驟完成
+			// Wait for all upstream steps to complete
 			for _, dep := range n.upstreams {
 				select {
 				case <-completed[dep]:
-					// 上游已完成
+					// upstream completed
 				case <-ctx.Done():
-					// 全局取消
+					// global cancellation
 					e.emit(StepEvent{Type: EventStepCancelled, StepID: n.step.ID, Err: ctx.Err()})
 					mu.Lock()
 					results[n.step.ID] = &StepResult{
@@ -294,7 +295,7 @@ func (e *Executor) Execute(plan *planner.Plan) Result {
 				}
 			}
 
-			// 檢查全局 context 是否已取消
+			// Check if global context is cancelled
 			select {
 			case <-ctx.Done():
 				e.emit(StepEvent{Type: EventStepCancelled, StepID: n.step.ID, Err: ctx.Err()})
@@ -310,13 +311,13 @@ func (e *Executor) Execute(plan *planner.Plan) Result {
 			default:
 			}
 
-			// 檢查上游是否有失敗（且策略非 skip）
+			// Check if upstream failed (with non-skip policy)
 			mu.Lock()
 			upstreamFailed := false
 			for _, dep := range n.upstreams {
 				sr := results[dep]
 				if sr != nil && sr.Err != nil {
-					// 查看上游步驟的 on_failure 策略
+					// Check upstream step's on_failure policy
 					upNode := nodes[dep]
 					if upNode != nil && upNode.step.OnFailure != "skip" {
 						upstreamFailed = true
@@ -339,18 +340,18 @@ func (e *Executor) Execute(plan *planner.Plan) Result {
 				return
 			}
 
-			// 組建此步驟的 context（來自所有上游步驟的輸出）
+			// Build context for this step (from all upstream step outputs)
 			priorContext := buildContext(n.upstreams)
 
-			// 發送開始事件
+			// Emit start event
 			fmt.Fprintf(os.Stderr, "\n📋 [%s] %s\n", n.step.ID, n.step.Description)
 			fmt.Fprintf(os.Stderr, "   agent: %s\n", n.step.Agent)
 			e.emit(StepEvent{Type: EventStepStart, StepID: n.step.ID})
 
-			// 執行步驟（含重試邏輯）
+			// Execute step (with retry logic)
 			sr := e.executeStep(n.step, priorContext)
 
-			// 儲存結果
+			// Store result
 			mu.Lock()
 			results[n.step.ID] = &sr
 			mu.Unlock()
@@ -359,7 +360,7 @@ func (e *Executor) Execute(plan *planner.Plan) Result {
 				fmt.Fprintf(os.Stderr, "   ❌ failed: %v\n", sr.Err)
 				e.emit(StepEvent{Type: EventStepFailed, StepID: n.step.ID, Result: &sr})
 
-				// 根據 on_failure 策略處理
+				// Handle according to on_failure policy
 				switch n.step.OnFailure {
 				case "skip":
 					fmt.Fprintf(os.Stderr, "   ⏭️  skipping (on_failure=skip)\n")
@@ -386,7 +387,7 @@ func (e *Executor) Execute(plan *planner.Plan) Result {
 					cancel()
 					return
 
-				default: // "retry" 已在 executeStep 中處理完畢，仍然失敗則 abort
+				default: // "retry" — already handled in executeStep; if still failed, abort
 					fmt.Fprintf(os.Stderr, "   🛑 all retries exhausted, aborting\n")
 					mu.Lock()
 					globalErr = fmt.Errorf("step %s failed after retries: %w", n.step.ID, sr.Err)
@@ -401,10 +402,10 @@ func (e *Executor) Execute(plan *planner.Plan) Result {
 		}(node)
 	}
 
-	// 等待所有 goroutine 完成
+	// Wait for all goroutines to complete
 	wg.Wait()
 
-	// 收集結果（按原始步驟順序）
+	// Collect results (in original step order)
 	mu.Lock()
 	var orderedResults []StepResult
 	allSuccess := true
@@ -444,9 +445,9 @@ func (e *Executor) Execute(plan *planner.Plan) Result {
 	}
 }
 
-// ===== 單步驟執行（含重試與驗證）=====
+// ===== Single Step Execution (with retry and verification) =====
 
-// executeStep 執行單一步驟，包含重試邏輯。
+// executeStep executes a single step, includes retry logic.
 func (e *Executor) executeStep(step planner.Step, priorContext string) StepResult {
 	start := time.Now()
 	var output string
@@ -462,7 +463,7 @@ func (e *Executor) executeStep(step planner.Step, priorContext string) StepResul
 			continue
 		}
 
-		// 驗證指令
+		// Verify command
 		if step.VerifyCmd != "" {
 			if verifyErr := e.verify(step.VerifyCmd); verifyErr != nil {
 				err = fmt.Errorf("verification failed: %w", verifyErr)
@@ -470,7 +471,7 @@ func (e *Executor) executeStep(step planner.Step, priorContext string) StepResul
 			}
 		}
 
-		// 成功
+		// Success
 		return StepResult{
 			StepID:      step.ID,
 			Description: step.Description,
@@ -493,12 +494,12 @@ func (e *Executor) executeStep(step planner.Step, priorContext string) StepResul
 	}
 }
 
-// runStep 執行步驟的具體指令。
-// 若 OutputEvents 已設定：
-//   - shell 指令：使用 StdoutPipe 逐行串流 stdout
-//   - AI agent（kiro/claude/gemini）：定期發送 progress 事件
+// runStep executes the concrete command for a step.
+// If OutputEvents is set:
+//   - shell commands: use StdoutPipe for line-by-line streaming
+//   - AI agents (kiro/claude/gemini): emit periodic progress events
 //
-// 若 OutputEvents 為 nil：行為完全向後相容（全部緩衝）。
+// If OutputEvents is nil: fully backward-compatible behavior (buffered).
 func (e *Executor) runStep(step planner.Step, priorContext string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), e.timeout)
 	defer cancel()
@@ -540,7 +541,7 @@ func (e *Executor) runStep(step planner.Step, priorContext string) (string, erro
 		cmd = exec.CommandContext(ctx, "bash", "-c", step.Command)
 
 	default:
-		// 直接當 shell command 跑（terraform, kubectl, helm, aws, gcloud）
+		// Run directly as shell command (terraform, kubectl, helm, aws, gcloud)
 		if step.Command != "" {
 			cmd = exec.CommandContext(ctx, "bash", "-c", step.Command)
 		} else {
@@ -550,20 +551,20 @@ func (e *Executor) runStep(step planner.Step, priorContext string) (string, erro
 
 	cmd.Dir = e.findWorkDir(step)
 
-	// 根據 agent 類型與 OutputEvents 是否啟用，選擇執行策略
+	// Choose execution strategy based on agent type and whether OutputEvents is enabled
 	isShellLike := step.Agent == "shell" || step.Command != ""
 
 	if e.OutputEvents != nil && isShellLike {
-		// Shell 指令：使用 StdoutPipe 逐行串流
+		// Shell commands: use StdoutPipe for line-by-line streaming
 		return e.runShellStreaming(cmd, step)
 	}
 
 	if e.OutputEvents != nil && !isShellLike {
-		// AI agent 呼叫：定期發送 progress 事件
+		// AI agent calls: emit periodic progress events
 		return e.runWithProgress(cmd, step)
 	}
 
-	// 無串流（向後相容）：緩衝全部輸出
+	// No streaming (backward-compatible): buffer all output
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -575,16 +576,16 @@ func (e *Executor) runStep(step planner.Step, priorContext string) (string, erro
 	return stdout.String(), nil
 }
 
-// runShellStreaming 使用 StdoutPipe 逐行串流 shell 指令輸出，
-// 同時保留完整 output 供後續步驟 context chain 使用。
+// runShellStreaming uses StdoutPipe for line-by-line streaming of shell command output,
+// while retaining the full output for downstream context chaining.
 func (e *Executor) runShellStreaming(cmd *exec.Cmd, step planner.Step) (string, error) {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
-	// 取得 stdout pipe
+	// Get stdout pipe
 	pipe, err := cmd.StdoutPipe()
 	if err != nil {
-		// fallback：回退到 buffered 模式
+		// fallback: revert to buffered mode
 		var stdout bytes.Buffer
 		cmd.Stdout = &stdout
 		if runErr := cmd.Run(); runErr != nil {
@@ -597,11 +598,11 @@ func (e *Executor) runShellStreaming(cmd *exec.Cmd, step planner.Step) (string, 
 		return "", fmt.Errorf("%s failed to start: %w", step.Agent, err)
 	}
 
-	// 逐行讀取 stdout 並發送 OutputEvent，同時收集完整輸出
+	// Read stdout line-by-line, emit OutputEvent, and collect full output
 	var stdout bytes.Buffer
 	streamErr := StreamReader(pipe, &stdout, e.OutputEvents, step.ID)
 
-	// 等待指令結束
+	// Wait for command to finish
 	cmdErr := cmd.Wait()
 
 	if streamErr != nil {
@@ -614,8 +615,8 @@ func (e *Executor) runShellStreaming(cmd *exec.Cmd, step planner.Step) (string, 
 	return stdout.String(), nil
 }
 
-// runWithProgress 用於 AI agent 呼叫（kiro/claude/gemini）。
-// 因為無法即時串流它們的輸出，改為定期發送 progress 事件表示仍在執行。
+// runWithProgress is used for AI agent calls (kiro/claude/gemini).
+// Since their output cannot be streamed in real-time, periodic progress events are emitted instead.
 func (e *Executor) runWithProgress(cmd *exec.Cmd, step planner.Step) (string, error) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -625,7 +626,7 @@ func (e *Executor) runWithProgress(cmd *exec.Cmd, step planner.Step) (string, er
 		return "", fmt.Errorf("%s failed to start: %w", step.Agent, err)
 	}
 
-	// 背景 goroutine 定期發送 progress 事件
+	// Background goroutine emits periodic progress events
 	done := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
@@ -638,7 +639,7 @@ func (e *Executor) runWithProgress(cmd *exec.Cmd, step planner.Step) (string, er
 			case <-ticker.C:
 				elapsed += 5
 				EmitProgress(e.OutputEvents, step.ID,
-					fmt.Sprintf("%s 執行中... (%ds)", step.Agent, elapsed))
+					fmt.Sprintf("%s executing... (%ds)", step.Agent, elapsed))
 			}
 		}
 	}()
@@ -653,7 +654,7 @@ func (e *Executor) runWithProgress(cmd *exec.Cmd, step planner.Step) (string, er
 	return stdout.String(), nil
 }
 
-// verify 執行步驟驗證指令。
+// verify executes the step verification command.
 func (e *Executor) verify(verifyCmd string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -668,9 +669,9 @@ func (e *Executor) verify(verifyCmd string) error {
 	return nil
 }
 
-// ===== 輔助函式 =====
+// ===== Helper Functions =====
 
-// findWorkDir 根據步驟的描述、指令等內容判斷工作目錄。
+// findWorkDir determines the working directory based on step description, command, etc.
 func (e *Executor) findWorkDir(step planner.Step) string {
 	text := strings.ToLower(step.Description + " " + step.Prompt + " " + step.Command)
 
@@ -693,7 +694,7 @@ func (e *Executor) findWorkDir(step planner.Step) string {
 	return ""
 }
 
-// truncate 截斷過長的字串。
+// truncate truncates an overly long string.
 func truncate(s string, max int) string {
 	s = strings.TrimSpace(s)
 	if len(s) <= max {
@@ -702,8 +703,8 @@ func truncate(s string, max int) string {
 	return s[:max] + "\n... (truncated)"
 }
 
-// parseFiles 從步驟輸出中擷取檔案宣告。
-// 格式：以 "FILE:" 開頭的行，內容為 "path|description"。
+// parseFiles extracts file declarations from step output.
+// Format: lines starting with "FILE:" containing "path|description".
 func parseFiles(output string) map[string]string {
 	files := make(map[string]string)
 	for _, line := range strings.Split(output, "\n") {
@@ -723,8 +724,8 @@ func parseFiles(output string) map[string]string {
 	return files
 }
 
-// parseKV 從步驟輸出中擷取鍵值對。
-// 格式：以 "KV:" 開頭的行，內容為 "key=value"。
+// parseKV extracts key-value pairs from step output.
+// Format: lines starting with "KV:" containing "key=value".
 func parseKV(output string) map[string]string {
 	kv := make(map[string]string)
 	for _, line := range strings.Split(output, "\n") {

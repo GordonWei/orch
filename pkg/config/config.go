@@ -19,9 +19,9 @@ type Config struct {
 	KeywordShortcuts []KeywordShortcut   `yaml:"keyword_shortcuts"`
 }
 
-// WorkflowConfig 定義工作流系統設定
+// WorkflowConfig defines the workflow system configuration.
 type WorkflowConfig struct {
-	Dir string `yaml:"dir"` // 工作流 YAML 檔案目錄，預設 ~/.config/orch/workflows/
+	Dir string `yaml:"dir"` // workflow YAML directory, default ~/.config/orch/workflows/
 }
 
 type Persona struct {
@@ -73,11 +73,11 @@ type KeywordShortcut struct {
 	Category string `yaml:"category"`
 }
 
-// Load 讀取 config，優先順序：ORCH_CONFIG env → ~/.config/orch/config.yaml → 內建預設
+// Load reads config with priority: ORCH_CONFIG env → ~/.config/orch/config.yaml → built-in defaults
 func Load() *Config {
 	cfg := defaultConfig()
 
-	// 找 config 檔
+	// Find config file
 	path := os.Getenv("ORCH_CONFIG")
 	if path == "" {
 		home, _ := os.UserHomeDir()
@@ -86,16 +86,16 @@ func Load() *Config {
 
 	data, err := os.ReadFile(expandHome(path))
 	if err != nil {
-		// 找不到 config，用預設
+		// Config not found, use defaults
 		return cfg
 	}
 
 	if err := yaml.Unmarshal(data, cfg); err != nil {
-		// parse 失敗，用預設
+		// Parse failed, use defaults
 		return cfg
 	}
 
-	// 展開 ~ 路徑
+	// Expand ~ paths
 	cfg.LocalLLM.PythonPath = expandHome(cfg.LocalLLM.PythonPath)
 	cfg.Workspace.Root = expandHome(cfg.Workspace.Root)
 	cfg.Memory.DBPath = expandHome(cfg.Memory.DBPath)
@@ -139,15 +139,15 @@ func defaultConfig() *Config {
 			Name:     "orch",
 			Owner:    "Gordon Wei",
 			Language: "zh-TW",
-			SystemPrompt: `你是 orch，一個運行在 Mac 上的 AI 幕僚長 CLI 工具。
-你的主人是 Gordon Wei（momo 基礎架構部部長）。
-你負責協調 kiro、claude、gemini 等多個 AI agent 完成任務。
+			SystemPrompt: `You are orch, an AI Chief of Staff CLI tool running on macOS.
+Your owner is Gordon Wei (Head of Infrastructure, momo).
+You coordinate multiple AI agents (kiro, claude, gemini) to complete tasks.
 
-回覆規則：
-- 一律使用繁體中文（zh-TW）回覆
-- 簡短直接，不廢話
-- 技術術語維持英文（Kubernetes、Terraform、GKE 等）
-- 程式碼、指令維持英文`,
+Response rules:
+- Reply in Traditional Chinese (zh-TW)
+- Be concise and direct
+- Keep technical terms in English (Kubernetes, Terraform, GKE, etc.)
+- Keep code and commands in English`,
 		},
 		LocalLLM: LocalLLM{
 			Endpoint:   "http://localhost:8080",
@@ -181,10 +181,10 @@ func defaultConfig() *Config {
 			Subdirs: []Subdir{
 				{Name: "AWS", Keywords: []string{"aws", "lambda", "s3", "ec2", "sam", "bedrock", "cloudformation"}},
 				{Name: "GCP", Keywords: []string{"gcp", "gke", "litellm", "cloud run", "bigquery", "gcloud"}},
-				{Name: "OnPremise", Keywords: []string{"on-premise", "onpremise", "rke2", "metallb", "gitea", "機房", "gateway api"}},
-				{Name: "momo", Keywords: []string{"momo", "週報", "大促", "績效", "okr", "1-on-1", "課長"}},
-				{Name: "Salesforce", Keywords: []string{"salesforce", "網銀", "銀行", "客戶提案", "lucy"}},
-				{Name: "Study", Keywords: []string{"study", "筆記", "學習", "orchestrator"}},
+				{Name: "OnPremise", Keywords: []string{"on-premise", "onpremise", "rke2", "metallb", "gitea", "datacenter", "gateway api"}},
+				{Name: "momo", Keywords: []string{"momo", "weekly", "incident", "performance", "okr", "1-on-1", "manager"}},
+				{Name: "Salesforce", Keywords: []string{"salesforce", "banking", "proposal", "lucy"}},
+				{Name: "Study", Keywords: []string{"study", "notes", "learning", "orchestrator"}},
 			},
 		},
 		Routing: map[string][]string{

@@ -1,6 +1,6 @@
-// Package workflow 提供 YAML 工作流模板系統。
-// 使用者可在 ~/.config/orch/workflows/ 定義可重複使用的多步驟工作流，
-// 透過觸發關鍵字自動執行，跳過 planner 的 AI 規劃階段。
+// Package workflow provides YAML workflow template system.
+// Users can define in ~/.config/orch/workflows/ define reusable multi-step workflows,
+// automatically execute via trigger keywords, bypass planner's AI planning phase.
 package workflow
 
 import (
@@ -15,7 +15,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// WorkflowStep 定義工作流中的單一步驟
+// WorkflowStep defines a single step in a workflow
 type WorkflowStep struct {
 	ID          string   `yaml:"id"`
 	Description string   `yaml:"description"`
@@ -27,7 +27,7 @@ type WorkflowStep struct {
 	OnFailure   string   `yaml:"on_failure,omitempty"`
 }
 
-// Workflow 定義一個完整的工作流模板
+// Workflow defines a complete workflow template
 type Workflow struct {
 	Name        string            `yaml:"name"`
 	Description string            `yaml:"description"`
@@ -36,11 +36,11 @@ type Workflow struct {
 	Steps       []WorkflowStep    `yaml:"steps"`
 }
 
-// LoadAll 載入指定目錄下所有 .yaml/.yml 工作流檔案
+// LoadAll loads all .yaml/.yml workflow files from specified directory
 func LoadAll(dir string) ([]Workflow, error) {
 	dir = expandHome(dir)
 
-	// 目錄不存在時回傳空切片（不視為錯誤）
+	// returns empty slice when directory doesn't exist (not treated as error)
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		return nil, nil
 	}
@@ -63,15 +63,15 @@ func LoadAll(dir string) ([]Workflow, error) {
 		path := filepath.Join(dir, entry.Name())
 		data, err := os.ReadFile(path)
 		if err != nil {
-			continue // 跳過讀取失敗的檔案
+			continue // skip files that fail to read
 		}
 
 		var w Workflow
 		if err := yaml.Unmarshal(data, &w); err != nil {
-			continue // 跳過格式錯誤的檔案
+			continue // skip files with format errors
 		}
 
-		// 至少要有 trigger 和 steps 才算有效
+		// requires at least trigger and steps to be valid
 		if w.Trigger != "" && len(w.Steps) > 0 {
 			workflows = append(workflows, w)
 		}
@@ -80,8 +80,8 @@ func LoadAll(dir string) ([]Workflow, error) {
 	return workflows, nil
 }
 
-// Match 根據使用者輸入比對工作流觸發關鍵字
-// 回傳第一個匹配的工作流，若無匹配回傳 nil
+// Match match workflow trigger keywords against user input
+// returns first matching workflow, returns nil if no match
 func Match(input string, workflows []Workflow) *Workflow {
 	inputLower := strings.ToLower(strings.TrimSpace(input))
 
@@ -91,7 +91,7 @@ func Match(input string, workflows []Workflow) *Workflow {
 			continue
 		}
 
-		// 完全匹配或輸入包含觸發詞
+		// exact match or input contains trigger
 		if inputLower == triggerLower || strings.Contains(inputLower, triggerLower) {
 			return &workflows[i]
 		}
@@ -100,23 +100,23 @@ func Match(input string, workflows []Workflow) *Workflow {
 	return nil
 }
 
-// ToPlanner 將 Workflow 轉換為 planner.Plan 以交由 executor 執行
-// vars 為使用者自定義變數，會與內建變數合併後進行模板替換
+// ToPlanner converts Workflow to planner.Plan for executor
+// vars are user-defined variables, merged with built-in variables for template substitution
 func ToPlanner(w *Workflow, vars map[string]string, cfg *config.Config) *planner.Plan {
-	// 合併內建變數
+	// merge built-in variables
 	allVars := builtinVars(cfg)
-	// 加入工作流本身定義的預設變數
+	// add workflow's own default variables
 	for k, v := range w.Variables {
 		allVars[k] = v
 	}
-	// 使用者提供的變數優先覆蓋
+	// user-provided variables take priority
 	for k, v := range vars {
 		allVars[k] = v
 	}
 
 	steps := make([]planner.Step, 0, len(w.Steps))
 	for _, ws := range w.Steps {
-		// 模板替換 prompt 和 command
+		// template substitution for prompt and command
 		prompt := renderTemplate(ws.Prompt, allVars)
 		command := renderTemplate(ws.Command, allVars)
 		description := renderTemplate(ws.Description, allVars)
@@ -142,7 +142,7 @@ func ToPlanner(w *Workflow, vars map[string]string, cfg *config.Config) *planner
 	}
 }
 
-// builtinVars 回傳內建模板變數
+// builtinVars returns built-in template variables
 func builtinVars(cfg *config.Config) map[string]string {
 	now := time.Now()
 	vars := map[string]string{
@@ -150,7 +150,7 @@ func builtinVars(cfg *config.Config) map[string]string {
 		"time": now.Format("15:04:05"),
 	}
 
-	// 從 config 取得使用者名稱
+	// get username from config
 	if cfg != nil && cfg.Persona.Owner != "" {
 		vars["user"] = cfg.Persona.Owner
 	}
@@ -158,14 +158,14 @@ func builtinVars(cfg *config.Config) map[string]string {
 	return vars
 }
 
-// renderTemplate 執行 Go 模板替換
-// 若模板解析或渲染失敗，回傳原始字串
+// renderTemplate execute Go template substitution
+// if template parse or render fails, return original string
 func renderTemplate(text string, vars map[string]string) string {
 	if text == "" {
 		return ""
 	}
 
-	// 快速檢查：沒有模板語法就直接回傳
+	// quick check: return directly if no template syntax
 	if !strings.Contains(text, "{{") {
 		return text
 	}
@@ -183,7 +183,7 @@ func renderTemplate(text string, vars map[string]string) string {
 	return buf.String()
 }
 
-// expandHome 展開 ~ 前綴路徑
+// expandHome expand ~ prefix path
 func expandHome(path string) string {
 	if strings.HasPrefix(path, "~/") {
 		home, _ := os.UserHomeDir()

@@ -1,48 +1,48 @@
 # Orch — Program Flow
 
-## 整體架構流程圖
+## Overall Architecture Flowchart
 
 ```mermaid
 flowchart TD
-    %% ===== 入口 =====
-    Start([使用者執行 orch]) --> ArgParse{解析參數}
+    %% ===== Entry =====
+    Start([User runs orch]) --> ArgParse{Parse arguments}
     
-    ArgParse -->|--tools| ShowTools[顯示本機工具 JSON]
-    ArgParse -->|--help| ShowHelp[顯示使用說明]
-    ArgParse -->|帶 prompt| Oneshot[Oneshot 模式]
-    ArgParse -->|無 prompt| REPL[REPL 模式]
+    ArgParse -->|--tools| ShowTools[Show local tools JSON]
+    ArgParse -->|--help| ShowHelp[Show usage]
+    ArgParse -->|with prompt| Oneshot[Oneshot mode]
+    ArgParse -->|no prompt| REPL[REPL mode]
     
-    ShowTools --> End([結束])
+    ShowTools --> End([Exit])
     ShowHelp --> End
 
-    %% ===== REPL 迴圈 =====
-    REPL --> RLInit[初始化 readline<br/>載入 ~/.orch_history]
-    RLInit --> RLWait[等待使用者輸入<br/>› prompt]
+    %% ===== REPL Loop =====
+    REPL --> RLInit[Init readline<br/>Load ~/.orch_history]
+    RLInit --> RLWait[Wait for input<br/>› prompt]
     RLWait -->|exit/quit/ctrl+d| Bye[👋 bye]
     RLWait -->|ctrl+c| RLWait
-    RLWait -->|tools| ShowToolsInline[印出工具 JSON] --> RLWait
-    RLWait -->|一般輸入| Oneshot
+    RLWait -->|tools| ShowToolsInline[Print tools JSON] --> RLWait
+    RLWait -->|input| Oneshot
     Bye --> End
 
-    %% ===== Oneshot 核心流程 =====
+    %% ===== Oneshot Core Flow =====
     Oneshot --> ScanReg
 
     subgraph Registry["📦 Tool Registry"]
-        ScanReg[掃描本機工具<br/>PATH lookup] --> DetectModel[偵測 model<br/>讀 config 檔]
-        DetectModel --> RegOut[產出工具清單 + 能力描述]
+        ScanReg[Scan local tools<br/>PATH lookup] --> DetectModel[Detect model<br/>Read config]
+        DetectModel --> RegOut[Output tool list + capabilities]
     end
 
     RegOut --> PlanPhase
 
-    subgraph Planner["🧠 Planner（三層 Fallback）"]
-        PlanPhase[接收使用者輸入] --> L1{Layer 1:<br/>Keyword Match}
-        L1 -->|匹配| PlanReady[Plan 就緒<br/>⚡ 0ms]
-        L1 -->|不匹配| L2{Layer 2:<br/>MLX Local LLM<br/>Qwen 2.5 3B}
-        L2 -->|成功| PlanReady2[Plan 就緒<br/>🍎 ~5s]
-        L2 -->|失敗/不可用| L3[Layer 3:<br/>Cloud LLM<br/>claude -p]
-        L3 --> ValidatePlan{JSON 合法?}
-        ValidatePlan -->|Yes| PlanReady3[Plan 就緒<br/>☁️ ~5-8s]
-        ValidatePlan -->|No| PlanFail[❌ 規劃失敗]
+    subgraph Planner["🧠 Planner (3-Layer Fallback)"]
+        PlanPhase[Receive user input] --> L1{Layer 1:<br/>Keyword Match}
+        L1 -->|match| PlanReady[Plan ready<br/>⚡ 0ms]
+        L1 -->|no match| L2{Layer 2:<br/>MLX Local LLM<br/>Qwen 2.5 3B}
+        L2 -->|success| PlanReady2[Plan ready<br/>🍎 ~5s]
+        L2 -->|failed/unavailable| L3[Layer 3:<br/>Cloud LLM<br/>claude -p]
+        L3 --> ValidatePlan{Valid JSON?}
+        ValidatePlan -->|Yes| PlanReady3[Plan ready<br/>☁️ ~5-8s]
+        ValidatePlan -->|No| PlanFail[❌ Planning failed]
         PlanReady2 --> ExecReady[Plan Ready]
         PlanReady --> ExecReady
         PlanReady3 --> ExecReady
@@ -52,49 +52,49 @@ flowchart TD
     ExecReady --> ExecPhase
 
     subgraph Executor["⚡ Executor"]
-        ExecPhase[依序執行 Steps] --> StepLoop
+        ExecPhase[Execute steps in order] --> StepLoop
 
-        subgraph StepLoop["Step 迴圈"]
+        subgraph StepLoop["Step Loop"]
             direction TB
-            NextStep[取下一個 Step] --> RouteAgent{判斷 Agent}
+            NextStep[Get next step] --> RouteAgent{Determine agent}
             RouteAgent -->|kiro| RunKiro[kiro-cli chat<br/>--trust-all-tools prompt]
             RouteAgent -->|claude| RunClaude[claude -p prompt]
             RouteAgent -->|gemini| RunGemini[gemini -p prompt]
-            RouteAgent -->|shell/其他| RunShell[bash -c command]
+            RouteAgent -->|shell/other| RunShell[bash -c command]
             
-            RunKiro --> Capture[捕捉 stdout]
+            RunKiro --> Capture[Capture stdout]
             RunClaude --> Capture
             RunGemini --> Capture
             RunShell --> Capture
             
-            Capture --> HasVerify{有 verify_cmd?}
-            HasVerify -->|No| StepOK[✅ Step 成功]
-            HasVerify -->|Yes| RunVerify[執行驗證指令]
+            Capture --> HasVerify{Has verify_cmd?}
+            HasVerify -->|No| StepOK[✅ Step succeeded]
+            HasVerify -->|Yes| RunVerify[Run verification]
             RunVerify --> VerifyResult{exit 0?}
             VerifyResult -->|Yes| StepOK
-            VerifyResult -->|No| Retry{重試 ≤ 3次?}
+            VerifyResult -->|No| Retry{Retry ≤ 3x?}
             Retry -->|Yes| RouteAgent
-            Retry -->|No| StepFail[❌ Step 失敗]
+            Retry -->|No| StepFail[❌ Step failed]
         end
 
-        StepOK --> ChainCtx[Output 串入<br/>下一步 Context]
-        ChainCtx --> MoreSteps{還有下一步?}
+        StepOK --> ChainCtx[Chain output into<br/>next step context]
+        ChainCtx --> MoreSteps{More steps?}
         MoreSteps -->|Yes| NextStep
-        MoreSteps -->|No| AllDone[全部完成]
-        StepFail --> TaskFail[💀 任務失敗]
+        MoreSteps -->|No| AllDone[All done]
+        StepFail --> TaskFail[💀 Task failed]
     end
 
-    %% ===== 結果 =====
-    AllDone --> Report[🏁 印出最終成品<br/>最後一步 output]
-    TaskFail --> ReportErr[印出錯誤位置]
+    %% ===== Results =====
+    AllDone --> Report[🏁 Print final output<br/>last step output]
+    TaskFail --> ReportErr[Print error location]
     
-    Report --> BackToREPL{來自 REPL?}
+    Report --> BackToREPL{From REPL?}
     ReportErr --> BackToREPL
     BackToREPL -->|Yes| RLWait
     BackToREPL -->|No| End
 ```
 
-## 模組依賴關係
+## Module Dependencies
 
 ```mermaid
 graph LR
@@ -104,28 +104,28 @@ graph LR
     PLN --> REG
     EXE --> PLN
 
-    REG -.-|讀取| CONF[~/.claude/settings.json]
-    REG -.-|PATH lookup| BIN[本機 CLI 工具]
-    PLN -.-|呼叫| CLAUDE[claude -p]
+    REG -.-|reads| CONF[~/.claude/settings.json]
+    REG -.-|PATH lookup| BIN[Local CLI tools]
+    PLN -.-|calls| CLAUDE[claude -p]
     EXE -.-|spawn| AGENTS[kiro / claude / gemini / shell]
 ```
 
-## 資料流
+## Data Flow
 
 ```mermaid
 sequenceDiagram
-    participant U as 使用者
+    participant U as User
     participant O as orch CLI
     participant R as Registry
     participant P as Planner (claude -p)
     participant E as Executor
     participant A as Agent (kiro/claude/shell)
 
-    U->>O: orch "查 S3 bucket"
+    U->>O: orch "check S3 buckets"
     O->>R: Scan()
     R-->>O: 8 tools available
     O->>P: GeneratePlan(prompt, tools)
-    P->>P: 組 system prompt + 呼叫 claude
+    P->>P: Build system prompt + call claude
     P-->>O: Plan{simple, query, 1 step}
     O->>E: Execute(plan)
     E->>A: aws s3 ls

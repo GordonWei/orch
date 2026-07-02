@@ -1,42 +1,42 @@
-# orch 操作手冊
+# orch Operations Manual
 
-## 日常使用
+## Daily Usage
 
-### 路由行為
+### Routing Behavior
 
-| 輸入類型 | 路由 | 範例 |
-|---------|------|------|
-| 工作流觸發詞 | 📋 YAML workflow | `orch "收工"` |
-| CLI 指令 | ⚡ shell 直接跑 | `orch "kubectl get pods"` |
-| 一般問答 | 🍎 本地 LLM | `orch "什麼是 K8s？"` |
-| 任務分派 | 🍎→agent | `orch "查 AWS 帳單"` |
+| Input Type | Route | Example |
+|-----------|-------|---------|
+| Workflow trigger | 📋 YAML workflow | `orch "signoff"` |
+| CLI command | ⚡ shell direct | `orch "kubectl get pods"` |
+| General Q&A | 🍎 local LLM | `orch "what is K8s?"` |
+| Task dispatch | 🍎→agent | `orch "check AWS billing"` |
 
-### 管理記憶
+### Managing Memory
 
 ```bash
-orch history                    # 最近 20 筆
-orch history search "kubectl"   # 搜尋
-orch history clear              # 清除全部
+orch history                    # last 20 entries
+orch history search "kubectl"   # search
+orch history clear              # clear all
 
-orch briefing                   # 顯示
-orch briefing set "重點：..."    # 手動設定
-orch briefing gen               # MLX 自動生成
+orch briefing                   # show
+orch briefing set "focus: ..."  # set manually
+orch briefing gen               # auto-generate via MLX
 ```
 
-## 設定修改
+## Configuration
 
-設定檔：`~/.config/orch/config.yaml`
+Config file: `~/.config/orch/config.yaml`
 
-### 切換模型
+### Switching Models
 
-把 `default: true` 移到你要的模型，改完重啟 MLX server：
+Move `default: true` to the desired model, then restart MLX server:
 
 ```bash
 pkill -f "mlx_lm.server"
-orch "hello"   # 自動啟動新模型
+orch "hello"   # auto-starts with new model
 ```
 
-### 用 Ollama
+### Using Ollama
 
 ```yaml
 models:
@@ -49,96 +49,96 @@ models:
     default: true
 ```
 
-需先 `brew install ollama && ollama pull llama3.1:8b`。
+Requires: `brew install ollama && ollama pull llama3.1:8b`
 
-### 記憶層
+### Memory Layer
 
 ```yaml
 memory:
-  briefing_on_boot: false    # 關閉啟動 briefing
-  auto_summarize: false      # 關閉自動摘要
-  history_limit: 5000        # 超過自動清理（0=無限）
+  briefing_on_boot: false    # disable boot briefing
+  auto_summarize: false      # disable auto-summarize
+  history_limit: 5000        # auto-prune above limit (0=unlimited)
 ```
 
-## 工作流模板
+## Workflow Templates
 
-放在 `~/.config/orch/workflows/*.yaml`，觸發詞命中時跳過 AI 規劃直接執行。
+Place YAML files in `~/.config/orch/workflows/`. Matching triggers bypass AI planning and execute directly.
 
 ```yaml
-name: "收工"
-trigger: "收工"
+name: "signoff"
+trigger: "signoff"
 steps:
   - id: step_1
     agent: kiro
-    prompt: "更新交接表"
+    prompt: "update handoff notes"
   - id: step_2
     agent: claude
-    prompt: "同步 Notion"
+    prompt: "sync to Notion"
     depends_on: [step_1]
 ```
 
-內建模板變數：`{{.date}}`、`{{.time}}`、`{{.user}}`
+Built-in template variables: `{{.date}}`, `{{.time}}`, `{{.user}}`
 
-## 故障排除
+## Troubleshooting
 
-### MLX server 啟動失敗
+### MLX server fails to start
 
 ```bash
-# 確認 venv 存在
+# verify venv exists
 ls ~/mlx-env/bin/python3
 
-# 手動啟動看錯誤
+# start manually to see errors
 ~/mlx-env/bin/python3 -m mlx_lm.server \
   --model mlx-community/Qwen2.5-1.5B-Instruct-4bit --port 8080
 
-# port 被佔
+# port conflict
 lsof -i :8080 && kill $(lsof -ti :8080)
 ```
 
-### 所有請求都走 cloud
+### All requests go to cloud
 
 ```bash
-curl http://localhost:8080/v1/models   # 應回 200
+curl http://localhost:8080/v1/models   # should return 200
 ```
 
-若失敗：確認 `auto_start: true` + `~/mlx-env/bin/python3` 存在。
+If it fails: verify `auto_start: true` and `~/mlx-env/bin/python3` exists.
 
-### LaunchAgent（daemon）管理
+### LaunchAgent (daemon) management
 
 ```bash
-# 狀態
+# status
 launchctl list | grep orch
 
-# 停止
+# stop
 launchctl unload ~/Library/LaunchAgents/com.orch.mlx-server.plist
 
-# 啟動
+# start
 launchctl load ~/Library/LaunchAgents/com.orch.mlx-server.plist
 
-# 日誌
+# logs
 tail -f ~/Library/Logs/orch-mlx.log
 ```
 
-### 直接操作 SQLite
+### Direct SQLite access
 
 ```bash
 sqlite3 ~/.config/orch/orch.db "SELECT timestamp, input, category FROM history ORDER BY id DESC LIMIT 10;"
 ```
 
-## 換機器
+## Migration (New Machine)
 
 ```bash
-# 新機器
+# new machine
 git clone https://github.com/GordonWei/orch.git && cd orch
 make install
 
-# 遷移設定和記憶（選用）
+# migrate config and memory (optional)
 scp old-mac:~/.config/orch/config.yaml ~/.config/orch/
 scp old-mac:~/.config/orch/orch.db ~/.config/orch/
 
-# 確認 agents
+# verify agents
 which kiro-cli && which claude
 
-# 測試
-orch "你好"
+# test
+orch "hello"
 ```

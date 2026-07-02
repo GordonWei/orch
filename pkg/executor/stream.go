@@ -7,43 +7,43 @@ import (
 	"time"
 )
 
-// ===== 輸出串流事件（補充現有的 EventChan 系統）=====
+// ===== Output Streaming Events (supplements existing EventChan system) =====
 //
-// 現有的 StepEvent / EventChan 用於步驟層級的生命週期通知（start/done/failed）。
-// OutputEvent 則用於步驟「執行期間」的即時輸出——讓 CLI 能逐行顯示 shell 指令的 stdout。
+// The existing StepEvent / EventChan is used for step-level lifecycle notifications (start/done/failed).
+// OutputEvent is for real-time output during step execution — allows CLI to display line-by-line shell stdout.
 
-// OutputEventType 定義輸出串流事件的種類
+// OutputEventType defines output streaming event types
 type OutputEventType string
 
 const (
-	OutputLine     OutputEventType = "output"   // shell 指令逐行輸出
-	OutputProgress OutputEventType = "progress" // AI agent 定期回報進度（無法即時串流）
+	OutputLine     OutputEventType = "output"   // shell command line-by-line output
+	OutputProgress OutputEventType = "progress" // AI agent periodic progress reports (cannot stream in real-time)
 )
 
-// OutputEvent 代表執行過程中產生的即時輸出事件
+// OutputEvent represents a real-time output event during execution
 type OutputEvent struct {
-	Type      OutputEventType // 事件類型
-	StepID    string          // 所屬步驟 ID（平行執行時用來區分來源）
-	Message   string          // 事件訊息內容（一行輸出或進度描述）
-	Timestamp time.Time       // 事件發生時間
+	Type      OutputEventType // event type
+	StepID    string          // owning step ID (used to distinguish source during parallel execution)
+	Message   string          // event message content (one line of output or progress description)
+	Timestamp time.Time       // event timestamp
 }
 
-// ===== StreamWriter：包裝 io.Writer，逐行發送 OutputEvent =====
+// ===== StreamWriter: wraps io.Writer, sends line by line OutputEvent =====
 
-// StreamWriter 同時寫入底層 Writer（緩衝完整輸出）並逐行發送事件到 channel。
-// 設計為 goroutine-safe：內部使用 mutex 保護共享狀態。
+// StreamWriter simultaneously writes to underlying Writer (buffers complete output) and sends events to channel line by line.
+// Designed to be goroutine-safe: uses internal mutex to protect shared state.
 type StreamWriter struct {
 	mu      sync.Mutex
-	inner   io.Writer         // 底層 writer（通常是 bytes.Buffer，收集完整輸出）
-	events  chan<- OutputEvent // 輸出事件 channel（nil 則不發送）
+	inner   io.Writer         // underlying writer (usually bytes.Buffer, collects complete output)
+	events  chan<- OutputEvent // output event channel (nil means no events sent)
 	stepID  string
-	lineBuf []byte // 行緩衝區，累積到換行才發送
+	lineBuf []byte // line buffer, accumulates until newline before sending
 }
 
-// NewStreamWriter 建立 StreamWriter。
-// inner: 底層 writer（完整輸出仍會寫入）
-// events: 輸出事件 channel（nil 則僅寫入 inner，不發送事件）
-// stepID: 用來標記事件來源步驟
+// NewStreamWriter creates a StreamWriter.
+// inner: underlying writer (complete output still written to underlying writer)
+// events: output event channel (nil means only writes to inner without sending events)
+// stepID: used to tag event source step
 func NewStreamWriter(inner io.Writer, events chan<- OutputEvent, stepID string) *StreamWriter {
 	return &StreamWriter{
 		inner:  inner,
@@ -52,24 +52,24 @@ func NewStreamWriter(inner io.Writer, events chan<- OutputEvent, stepID string) 
 	}
 }
 
-// Write 實作 io.Writer 介面。
-// 每收到資料就寫入 inner，並逐行切割發送 OutputLine 事件。
+// Write implements io.Writer interface.
+// Writes data on receipt to inner, and splits and sends line by line OutputLine events.
 func (sw *StreamWriter) Write(p []byte) (n int, err error) {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
 
-	// 先寫入底層 writer（保證完整輸出不遺失）
+	// Write to underlying writer first (ensures complete output is not lost)
 	n, err = sw.inner.Write(p)
 	if err != nil {
 		return n, err
 	}
 
-	// 若沒有事件 channel，不需要逐行處理
+	// If no event channel, no line processing needed
 	if sw.events == nil {
 		return n, nil
 	}
 
-	// 逐 byte 累積行緩衝區，遇到換行就發送
+	// Accumulate line buffer byte by byte, send on newline
 	for _, b := range p[:n] {
 		if b == '\n' {
 			sw.emitLine(string(sw.lineBuf))
@@ -82,7 +82,7 @@ func (sw *StreamWriter) Write(p []byte) (n int, err error) {
 	return n, nil
 }
 
-// Flush 將行緩衝區中殘餘的不完整行強制發送（步驟結束時呼叫）。
+// Flush force-sends remaining incomplete line in buffer (called when step ends).
 func (sw *StreamWriter) Flush() {
 	sw.mu.Lock()
 	defer sw.mu.Unlock()
@@ -93,7 +93,7 @@ func (sw *StreamWriter) Flush() {
 	}
 }
 
-// emitLine 發送一行輸出事件（呼叫時 mutex 已持有）。
+// emitLine emits one output line event (mutex already held when called).
 func (sw *StreamWriter) emitLine(line string) {
 	sw.events <- OutputEvent{
 		Type:      OutputLine,
@@ -103,26 +103,26 @@ func (sw *StreamWriter) emitLine(line string) {
 	}
 }
 
-// ===== StreamReader：從 io.Reader 逐行串流 =====
+// ===== StreamReader: stream line by line from io.Reader =====
 
-// StreamReader 從 reader 逐行讀取，每行同時寫入 writer 並發送事件。
-// 常用於 cmd.StdoutPipe() 的輸出串流。
-// 此函式會阻塞直到 reader EOF 或 error。
+// StreamReader reads line by line from reader, each line written to writer and event sent.
+// Commonly used for cmd.StdoutPipe() output streaming.
+// This function blocks until reader EOF or error.
 func StreamReader(reader io.Reader, writer io.Writer, events chan<- OutputEvent, stepID string) error {
 	scanner := bufio.NewScanner(reader)
-	// 加大 buffer 以處理長行（預設 64KB，上限 1MB）
+	// Increase buffer for long lines (default 64KB, max 1MB)
 	buf := make([]byte, 64*1024)
 	scanner.Buffer(buf, 1024*1024)
 
 	for scanner.Scan() {
 		line := scanner.Text()
 
-		// 寫入 writer（含換行）
+		// Write to writer including newline
 		if _, err := writer.Write([]byte(line + "\n")); err != nil {
 			return err
 		}
 
-		// 發送事件
+		// Send event
 		if events != nil {
 			events <- OutputEvent{
 				Type:      OutputLine,
@@ -136,9 +136,9 @@ func StreamReader(reader io.Reader, writer io.Writer, events chan<- OutputEvent,
 	return scanner.Err()
 }
 
-// ===== EmitProgress：發送進度事件的快捷函式 =====
+// ===== EmitProgress: convenience function for sending progress events =====
 
-// EmitProgress 安全地向 channel 發送進度事件（若 channel 為 nil 則不操作）。
+// EmitProgress safely sends progress event to channel (no-op if channel is nil).
 func EmitProgress(events chan<- OutputEvent, stepID, message string) {
 	if events == nil {
 		return

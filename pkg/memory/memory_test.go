@@ -82,7 +82,7 @@ func TestBriefing(t *testing.T) {
 	}
 
 	// Set
-	if err := store.SetBriefing("今日重點：litellm PRD 部署完成"); err != nil {
+	if err := store.SetBriefing("Today's focus: litellm PRD deployment complete"); err != nil {
 		t.Fatalf("set briefing: %v", err)
 	}
 
@@ -90,19 +90,19 @@ func TestBriefing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get briefing: %v", err)
 	}
-	if content != "今日重點：litellm PRD 部署完成" {
+	if content != "Today's focus: litellm PRD deployment complete" {
 		t.Errorf("unexpected briefing: %q", content)
 	}
 
 	// Overwrite
-	if err := store.SetBriefing("新的 briefing"); err != nil {
+	if err := store.SetBriefing("new briefing"); err != nil {
 		t.Fatalf("set briefing 2: %v", err)
 	}
 	content, _, err = store.GetBriefing()
 	if err != nil {
 		t.Fatalf("get briefing 2: %v", err)
 	}
-	if content != "新的 briefing" {
+	if content != "new briefing" {
 		t.Errorf("expected overwrite, got %q", content)
 	}
 }
@@ -112,7 +112,7 @@ func TestPrompts(t *testing.T) {
 	defer cleanup()
 
 	// Set
-	if err := store.SetPrompt("default", "你是 orch..."); err != nil {
+	if err := store.SetPrompt("default", "you are orch..."); err != nil {
 		t.Fatalf("set prompt: %v", err)
 	}
 
@@ -121,19 +121,19 @@ func TestPrompts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get prompt: %v", err)
 	}
-	if content != "你是 orch..." {
+	if content != "you are orch..." {
 		t.Errorf("unexpected prompt: %q", content)
 	}
 
 	// Update (upsert)
-	if err := store.SetPrompt("default", "更新後的 prompt"); err != nil {
+	if err := store.SetPrompt("default", "updated prompt"); err != nil {
 		t.Fatalf("update prompt: %v", err)
 	}
 	content, err = store.GetPrompt("default")
 	if err != nil {
 		t.Fatalf("get updated prompt: %v", err)
 	}
-	if content != "更新後的 prompt" {
+	if content != "updated prompt" {
 		t.Errorf("expected update, got %q", content)
 	}
 

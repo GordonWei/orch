@@ -13,8 +13,8 @@ import (
 	"github.com/gordonwei/orch/pkg/registry"
 )
 
-// Step 代表一個執行計畫中的單一步驟。
-// DependsOn 支援多重依賴：步驟必須等待所有上游步驟完成後才會開始。
+// Step represents a single step in an execution plan.
+// DependsOn supports multiple dependencies: a step must wait for all upstream steps to complete before starting.
 type Step struct {
 	ID          string   `json:"id"`
 	Description string   `json:"description"`
@@ -22,13 +22,13 @@ type Step struct {
 	Command     string   `json:"command,omitempty"`
 	Prompt      string   `json:"prompt,omitempty"`
 	VerifyCmd   string   `json:"verify_cmd,omitempty"`
-	DependsOn   []string `json:"depends_on,omitempty"` // 上游步驟 ID 列表（支援 DAG 並行）
+	DependsOn   []string `json:"depends_on,omitempty"` // upstream step ID list (supports DAG parallelism)
 	OnFailure   string   `json:"on_failure,omitempty"` // "retry" (default), "skip", "re-plan", "abort"
 }
 
-// UnmarshalJSON 提供向下相容：接受 "depends_on": "step_1" (字串) 或 ["step_1","step_2"] (陣列)。
+// UnmarshalJSON provides backward compatible parsing: accepts "depends_on": "step_1" (string) or ["step_1","step_2"] (array).
 func (s *Step) UnmarshalJSON(data []byte) error {
-	// 使用別名避免無限遞迴
+	// Use alias to avoid infinite recursion
 	type stepAlias Step
 	type stepRaw struct {
 		stepAlias
@@ -47,14 +47,14 @@ func (s *Step) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 
-	// 嘗試解析為字串陣列
+	// Try to parse as string array
 	var arr []string
 	if err := json.Unmarshal(raw.DependsOnRaw, &arr); err == nil {
 		s.DependsOn = arr
 		return nil
 	}
 
-	// 嘗試解析為單一字串（向下相容舊格式）
+	// Try to parse as single string (backward compatible with old format)
 	var single string
 	if err := json.Unmarshal(raw.DependsOnRaw, &single); err == nil {
 		if single != "" {
@@ -90,26 +90,26 @@ func New(reg *registry.Registry, cfg *config.Config) *Planner {
 }
 
 func (p *Planner) GeneratePlan(userInput string) (*Plan, error) {
-	// Layer 1: 本地 keyword 快速路由（簡單任務直接出 plan）
+	// Layer 1: Local keyword fast routing (simple tasks get plan directly)
 	if plan := p.tryKeywordPlan(userInput); plan != nil {
 		fmt.Fprintf(os.Stderr, "   ⚡ routed by: keyword match\n")
 		return plan, nil
 	}
 
-	// Layer 2: MLX local LLM（Apple Silicon 本地推理）
+	// Layer 2: MLX local LLM (Apple Silicon local inference)
 	if p.mlxAvailable() {
 		plan, err := p.tryMLX(userInput)
 		if err == nil && plan != nil {
 			fmt.Fprintf(os.Stderr, "   🍎 routed by: MLX local (Qwen 2.5 3B)\n")
 			return plan, nil
 		}
-		// MLX 失敗，fallback 到 cloud
+		// MLX failed, fallback to cloud
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "   ⚠️  MLX failed: %v, falling back to cloud\n", err)
 		}
 	}
 
-	// Layer 3: Cloud LLM（claude -p）
+	// Layer 3: Cloud LLM (claude -p)
 	fmt.Fprintf(os.Stderr, "   ☁️  routed by: claude (cloud)\n")
 	return p.tryCloud(userInput)
 }
@@ -143,7 +143,7 @@ func (p *Planner) tryKeywordPlan(input string) *Plan {
 // ===== Layer 2: MLX LM Server (OpenAI-compatible local API) =====
 
 func (p *Planner) mlxAvailable() bool {
-	// 嘗試 ping mlx_lm.server
+	// Try to ping mlx_lm.server
 	resp, err := http.Get(p.mlxEndpoint + "/v1/models")
 	if err != nil {
 		return false
@@ -229,8 +229,8 @@ OUTPUT FORMAT (valid JSON only, no markdown):
 		return nil, fmt.Errorf("mlx returned plan with no steps")
 	}
 
-	// Post-processing: 修正小模型的常見錯誤
-	// 如果 shell step 的 command 不是使用者原文，改路由到 kiro
+	// Post-processing: fix common mistakes from small models
+	// If shell step's command is not the user's original input, reroute to kiro
 	plan = *p.fixPlan(&plan, userInput)
 
 	return &plan, nil
@@ -238,17 +238,17 @@ OUTPUT FORMAT (valid JSON only, no markdown):
 
 // ===== Plan Post-Processing =====
 
-// fixPlan 修正小模型的常見錯誤：
-// 1. 使用者輸入是自然語言但被路由到 shell → 改派 claude
-// 2. command 含有 placeholder（your-region, <xxx>）→ 小模型瞎猜的
-// 3. shell step 但沒有 command 也沒有 prompt → 無法執行
-// 4. plan 本身是 schema 照抄（task_summary="one line" 等）→ 改成 chat
+// fixPlan fixes common mistakes from small models:
+// 1. User input is natural language but routed to shell → reroute to claude
+// 2. command contains placeholder (your-region, <xxx>) → hallucinated by small model
+// 3. shell step but no command and no prompt → cannot execute
+// 4. plan itself is schema copy-paste (task_summary="one line" etc.) → convert to chat
 func (p *Planner) fixPlan(plan *Plan, userInput string) *Plan {
-	// 偵測 plan 層級的 schema 照抄
+	// Detect plan-level schema copy-paste
 	schemaJunk := []string{"one line", "what to do", "task description", "one line summary"}
 	for _, junk := range schemaJunk {
 		if strings.ToLower(plan.TaskSummary) == junk {
-			// 整個 plan 是 schema 照抄，改成 chat
+			// Entire plan is schema copy-paste, convert to chat
 			return &Plan{
 				TaskSummary: userInput,
 				Difficulty:  "simple",
@@ -282,7 +282,7 @@ func (p *Planner) fixPlan(plan *Plan, userInput string) *Plan {
 		switch step.Agent {
 		case "shell", "aws", "gcloud", "kubectl", "helm", "terraform":
 			if step.Command != "" {
-				// 如果使用者輸入是自然語言，但小模型嘗試自己生 command → 改派 claude
+				// If user input is natural language but small model tried to generate command → reroute to claude
 				if isNaturalLanguage && step.Command != userInput {
 					step.Agent = "claude"
 					step.Prompt = userInput
@@ -302,18 +302,18 @@ func (p *Planner) fixPlan(plan *Plan, userInput string) *Plan {
 	return plan
 }
 
-// looksLikeNaturalLanguage 判斷輸入是否是自然語言（非直接 CLI 指令）
+// looksLikeNaturalLanguage checks whether input is natural language (not a direct CLI command)
 func looksLikeNaturalLanguage(input string) bool {
 	trimmed := strings.TrimSpace(input)
 
-	// 含中文字 → 自然語言
+	// Contains Chinese characters → natural language
 	for _, r := range trimmed {
 		if r >= 0x4e00 && r <= 0x9fff {
 			return true
 		}
 	}
 
-	// 以常見 CLI 工具開頭 → 不是自然語言
+	// Starts with common CLI tool → not natural language
 	cliPrefixes := []string{"kubectl", "helm", "terraform", "tf", "aws", "gcloud", "docker", "git", "ls", "cat", "echo", "hostname", "ping", "curl", "wget", "ssh", "scp", "cd", "mkdir", "rm", "cp", "mv", "grep", "find", "ps", "top", "df", "du", "ifconfig", "ip ", "sw_vers", "uname", "whoami", "date", "which", "brew"}
 	lower := strings.ToLower(trimmed)
 	for _, prefix := range cliPrefixes {
@@ -322,12 +322,12 @@ func looksLikeNaturalLanguage(input string) bool {
 		}
 	}
 
-	// 含有多個空格（句子） → 自然語言
+	// Contains multiple spaces (sentence) → natural language
 	if strings.Count(trimmed, " ") >= 3 {
 		return true
 	}
 
-	// 以動詞開頭的英文（help, list, show, check, find, get...） → 可能自然語言
+	// Starts with verb in English (help, list, show, check, find, get...) → likely natural language
 	nlVerbs := []string{"help", "list", "show", "check", "find", "get ", "tell", "what", "how", "why", "can ", "please", "幫", "查", "列", "看", "找"}
 	for _, v := range nlVerbs {
 		if strings.HasPrefix(lower, v) {
@@ -338,11 +338,11 @@ func looksLikeNaturalLanguage(input string) bool {
 	return false
 }
 
-// looksInvalid 檢查 command 是否明顯有問題
+// looksInvalid checks whether command is obviously invalid
 func looksInvalid(cmd string) bool {
 	lower := strings.ToLower(cmd)
 
-	// 含有 placeholder
+	// Contains placeholder
 	placeholders := []string{"your-", "<your", "${your", "example.com", "placeholder", "<region>", "<project>", "<cluster>", "only for", "for ai agents", "direct answer", "what to do", "task description"}
 	for _, ph := range placeholders {
 		if strings.Contains(lower, ph) {
@@ -350,17 +350,17 @@ func looksInvalid(cmd string) bool {
 		}
 	}
 
-	// 含有角括號 placeholder 模式（<xxx>）
+	// Contains angle brackets placeholder pattern (<xxx>)
 	if strings.Contains(cmd, "<") && strings.Contains(cmd, ">") {
 		return true
 	}
 
-	// 含有 "..." 省略號（模型照抄 schema）
+	// Contains "..." ellipsis (model copy-pasted schema)
 	if strings.Contains(cmd, "...") {
 		return true
 	}
 
-	// 含有括號裡的說明文字（像 "(only for shell)"）
+	// Contains explanation text in parentheses (like "(only for shell)")
 	if strings.Contains(cmd, "(") && strings.Contains(cmd, ")") {
 		return true
 	}
@@ -432,7 +432,7 @@ Respond ONLY with valid JSON matching this schema:
 }`, toolsSummary)
 }
 
-// DirectChat 用本地 MLX 直接回答一般對話（不走 plan→execute）
+// DirectChat uses local MLX to directly answer general chat (bypasses plan→execute)
 func (p *Planner) DirectChat(userInput string) (string, error) {
 	if !p.mlxAvailable() {
 		return "", fmt.Errorf("MLX server not available for direct chat")
@@ -483,7 +483,7 @@ func (p *Planner) DirectChat(userInput string) (string, error) {
 // ===== Helpers =====
 
 func extractJSON(s string) string {
-	// 嘗試找 ```json ... ``` 包裹
+	// Try to find ```json ... ``` wrapper
 	if idx := strings.Index(s, "```json"); idx != -1 {
 		s = s[idx+7:]
 		if end := strings.Index(s, "```"); end != -1 {
@@ -496,7 +496,7 @@ func extractJSON(s string) string {
 		}
 	}
 
-	// 嘗試找第一個 { 到最後一個 }
+	// Try to find first { to last }
 	start := strings.Index(s, "{")
 	end := strings.LastIndex(s, "}")
 	if start != -1 && end != -1 && end > start {

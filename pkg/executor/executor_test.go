@@ -16,7 +16,7 @@ func testConfig() *config.Config {
 	}
 }
 
-// TestExecuteShellStep 驗證單一 shell 步驟的基本執行。
+// TestExecuteShellStep verifies basic execution of a single shell step.
 func TestExecuteShellStep(t *testing.T) {
 	e := New(testConfig())
 
@@ -50,7 +50,7 @@ func TestExecuteShellStep(t *testing.T) {
 	}
 }
 
-// TestExecuteMultiStepWithDeps 驗證有依賴的多步驟串列執行。
+// TestExecuteMultiStepWithDeps verifies sequential multi-step execution with dependencies.
 func TestExecuteMultiStepWithDeps(t *testing.T) {
 	e := New(testConfig())
 
@@ -85,8 +85,8 @@ func TestExecuteMultiStepWithDeps(t *testing.T) {
 	}
 }
 
-// TestParallelExecution 驗證無依賴的步驟確實並行執行。
-// 三個 sleep 0.3s 的步驟如果並行，整體應在 ~0.5s 內完成。
+// TestParallelExecution verifies steps without dependencies run in parallel.
+// Three steps sleeping 0.3s should complete in ~0.5s if parallel.
 func TestParallelExecution(t *testing.T) {
 	e := New(testConfig())
 
@@ -127,15 +127,15 @@ func TestParallelExecution(t *testing.T) {
 		t.Fatalf("expected 3 step results, got %d", len(result.Steps))
 	}
 
-	// 如果是循序執行，需要 0.9s+。並行應在 0.6s 內完成。
+	// Sequential would take 0.9s+. Parallel should finish within 0.6s.
 	if elapsed > 700*time.Millisecond {
 		t.Errorf("parallel execution took %v, expected < 700ms (steps should run concurrently)", elapsed)
 	}
 	t.Logf("parallel execution of 3 x sleep(0.3) completed in %v", elapsed)
 }
 
-// TestDAGDependencyOrder 驗證 DAG 中依賴順序被正確尊重。
-// 步驟 C 依賴 A 和 B，A 和 B 並行執行。
+// TestDAGDependencyOrder verifies DAG respects dependency order.
+// Step C depends on A and B; A and B run in parallel.
 func TestDAGDependencyOrder(t *testing.T) {
 	e := New(testConfig())
 
@@ -175,7 +175,7 @@ func TestDAGDependencyOrder(t *testing.T) {
 		t.Fatalf("expected 3 step results, got %d", len(result.Steps))
 	}
 
-	// 找到 step C 的結果，確認它在 A 和 B 之後
+	// Find step C result, confirm it ran after A and B
 	var cResult *StepResult
 	for i := range result.Steps {
 		if result.Steps[i].StepID == "c" {
@@ -193,7 +193,7 @@ func TestDAGDependencyOrder(t *testing.T) {
 	}
 }
 
-// TestContextChainFromMultipleDeps 驗證步驟能正確接收多個上游的 context。
+// TestContextChainFromMultipleDeps verifies step receives context from multiple upstreams.
 func TestContextChainFromMultipleDeps(t *testing.T) {
 	e := New(testConfig())
 
@@ -224,7 +224,7 @@ func TestContextChainFromMultipleDeps(t *testing.T) {
 		t.Fatalf("expected success: %v", result.Err)
 	}
 
-	// 驗證 a 和 b 的 KV 被正確 parse
+	// Verify KV from a and b are correctly parsed
 	for _, sr := range result.Steps {
 		switch sr.StepID {
 		case "a":
@@ -239,7 +239,7 @@ func TestContextChainFromMultipleDeps(t *testing.T) {
 	}
 }
 
-// TestExecuteWithVerify 驗證步驟的 verify_cmd 邏輯。
+// TestExecuteWithVerify verifies step verify_cmd logic.
 func TestExecuteWithVerify(t *testing.T) {
 	e := New(testConfig())
 
@@ -268,10 +268,10 @@ func TestExecuteWithVerify(t *testing.T) {
 	}
 }
 
-// TestExecuteFailedVerify 驗證 verify_cmd 失敗時的行為。
+// TestExecuteFailedVerify verifies behavior when verify_cmd fails.
 func TestExecuteFailedVerify(t *testing.T) {
 	e := New(testConfig())
-	e.maxRetries = 1 // 減少等待時間
+	e.maxRetries = 1 // reduce wait time
 
 	plan := &planner.Plan{
 		TaskSummary: "fail verify test",
@@ -295,7 +295,7 @@ func TestExecuteFailedVerify(t *testing.T) {
 	}
 }
 
-// TestOnFailureSkip 驗證 on_failure=skip 時下游步驟仍然執行。
+// TestOnFailureSkip verifies downstream steps still execute when on_failure=skip.
 func TestOnFailureSkip(t *testing.T) {
 	e := New(testConfig())
 	e.maxRetries = 0
@@ -306,7 +306,7 @@ func TestOnFailureSkip(t *testing.T) {
 			{
 				ID:        "a",
 				Agent:     "shell",
-				Command:   "exit 1", // 故意失敗
+				Command:   "exit 1", // intentional failure
 				OnFailure: "skip",
 			},
 			{
@@ -320,12 +320,12 @@ func TestOnFailureSkip(t *testing.T) {
 
 	result := e.Execute(plan)
 
-	// 不應完全成功（a 失敗了）
+	// Should not be fully successful (a failed)
 	if result.Success {
 		t.Fatal("expected overall failure since step a failed")
 	}
 
-	// 但 b 應該有被執行（因為 a 是 skip）
+	// But b should have executed (since a has skip policy)
 	var bResult *StepResult
 	for i := range result.Steps {
 		if result.Steps[i].StepID == "b" {
@@ -340,7 +340,7 @@ func TestOnFailureSkip(t *testing.T) {
 	}
 }
 
-// TestOnFailureAbort 驗證 on_failure=abort 時取消所有待執行步驟。
+// TestOnFailureAbort verifies all pending steps are cancelled when on_failure=abort.
 func TestOnFailureAbort(t *testing.T) {
 	e := New(testConfig())
 	e.maxRetries = 0
@@ -351,7 +351,7 @@ func TestOnFailureAbort(t *testing.T) {
 			{
 				ID:        "a",
 				Agent:     "shell",
-				Command:   "exit 1", // 故意失敗
+				Command:   "exit 1", // intentional failure
 				OnFailure: "abort",
 			},
 			{
@@ -371,13 +371,13 @@ func TestOnFailureAbort(t *testing.T) {
 		t.Fatal("expected failure")
 	}
 
-	// b 不應該跑 5 秒
+	// b should not run for 5 seconds
 	if elapsed > 2*time.Second {
 		t.Errorf("abort should have cancelled quickly, took %v", elapsed)
 	}
 }
 
-// TestOnFailureRePlan 驗證 on_failure=re-plan 時正確觸發回呼。
+// TestOnFailureRePlan verifies re-plan callback is triggered correctly.
 func TestOnFailureRePlan(t *testing.T) {
 	e := New(testConfig())
 	e.maxRetries = 0
@@ -419,7 +419,7 @@ func TestOnFailureRePlan(t *testing.T) {
 	}
 }
 
-// TestCycleDetection 驗證循環依賴的偵測。
+// TestCycleDetection verifies cycle detection in dependencies.
 func TestCycleDetection(t *testing.T) {
 	e := New(testConfig())
 
@@ -452,7 +452,7 @@ func TestCycleDetection(t *testing.T) {
 	t.Logf("cycle error: %v", result.Err)
 }
 
-// TestDuplicateStepID 驗證重複 step ID 的錯誤偵測。
+// TestDuplicateStepID verifies duplicate step ID error detection.
 func TestDuplicateStepID(t *testing.T) {
 	e := New(testConfig())
 
@@ -470,7 +470,7 @@ func TestDuplicateStepID(t *testing.T) {
 	}
 }
 
-// TestMissingDependency 驗證依賴不存在的步驟 ID 時的錯誤。
+// TestMissingDependency verifies error when depending on non-existent step ID.
 func TestMissingDependency(t *testing.T) {
 	e := New(testConfig())
 
@@ -492,7 +492,7 @@ func TestMissingDependency(t *testing.T) {
 	}
 }
 
-// TestEventsChan 驗證串流事件正確發送。
+// TestEventsChan verifies streaming events are sent correctly.
 func TestEventsChan(t *testing.T) {
 	e := New(testConfig())
 	e.EventChan = make(chan StepEvent, 100) // buffered to avoid blocking
@@ -508,7 +508,7 @@ func TestEventsChan(t *testing.T) {
 		},
 	}
 
-	// 在另一個 goroutine 中收集事件（Execute 完成後會 close channel）
+	// Collect events in another goroutine (Execute closes channel when done)
 	var events []StepEvent
 	done := make(chan struct{})
 	go func() {
@@ -519,13 +519,13 @@ func TestEventsChan(t *testing.T) {
 	}()
 
 	result := e.Execute(plan)
-	<-done // 等待事件收集完成
+	<-done // wait for event collection to complete
 
 	if !result.Success {
 		t.Fatalf("expected success: %v", result.Err)
 	}
 
-	// 應該至少有一個 Start 和一個 Done 事件
+	// Should have at least one Start and one Done event
 	var hasStart, hasDone bool
 	for _, ev := range events {
 		if ev.StepID == "a" && ev.Type == EventStepStart {
@@ -543,7 +543,7 @@ func TestEventsChan(t *testing.T) {
 	}
 }
 
-// TestDiamondDAG 驗證鑽石型 DAG（A → B,C → D）的正確並行。
+// TestDiamondDAG verifies diamond DAG (A → B,C → D) parallel execution.
 //
 //	    A
 //	   / \
@@ -574,14 +574,14 @@ func TestDiamondDAG(t *testing.T) {
 		t.Fatalf("expected 4 results, got %d", len(result.Steps))
 	}
 
-	// B 和 C 並行 → 整體不應超過 0.5s（循序需 0.4s + overhead）
+	// B and C parallel → total should not exceed 0.5s (sequential needs 0.4s+)
 	if elapsed > 600*time.Millisecond {
 		t.Errorf("diamond DAG took %v, B and C should run in parallel", elapsed)
 	}
 	t.Logf("diamond DAG completed in %v", elapsed)
 }
 
-// TestExecuteUnknownAgent 驗證未知 agent 的錯誤處理。
+// TestExecuteUnknownAgent verifies error handling for unknown agent.
 func TestExecuteUnknownAgent(t *testing.T) {
 	e := New(testConfig())
 	e.maxRetries = 0
@@ -602,7 +602,7 @@ func TestExecuteUnknownAgent(t *testing.T) {
 	}
 }
 
-// TestTruncate 驗證 truncate 輔助函式。
+// TestTruncate verifies truncate helper function.
 func TestTruncate(t *testing.T) {
 	short := "hello"
 	if truncate(short, 100) != "hello" {
@@ -619,7 +619,7 @@ func TestTruncate(t *testing.T) {
 	}
 }
 
-// TestNoDepsRunsImmediately 驗證 DependsOn 為空的步驟立即執行（向後相容）。
+// TestNoDepsRunsImmediately verifies empty DependsOn runs immediately (backward compat).
 func TestNoDepsRunsImmediately(t *testing.T) {
 	e := New(testConfig())
 
@@ -630,7 +630,7 @@ func TestNoDepsRunsImmediately(t *testing.T) {
 				ID:      "solo",
 				Agent:   "shell",
 				Command: "echo immediate",
-				// DependsOn 為空
+				// DependsOn is empty
 			},
 		},
 	}

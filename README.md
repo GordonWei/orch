@@ -1,8 +1,8 @@
-# orch — AI 幕僚長 CLI
+# orch — AI Chief of Staff CLI
 
-一個 CLI 入口，你只說要什麼，它自己規劃、分派、執行、驗證、交付成品。
+A single CLI entry point: describe what you need, and it plans, dispatches, executes, verifies, and delivers.
 
-## 快速開始
+## Quick Start
 
 ```bash
 git clone https://github.com/GordonWei/orch.git
@@ -10,142 +10,142 @@ cd orch
 make install
 ```
 
-完成後執行：
+Then run:
 
 ```bash
-orch "你好"
+orch "hello"
 ```
 
-## 系統需求
+## Requirements
 
 - macOS (Apple Silicon M1+)
 - Go 1.22+
-- Python 3.10+（MLX LM 推理用）
-- kiro-cli 或 claude CLI（AI agent backend）
+- Python 3.10+ (for MLX LM inference)
+- kiro-cli or claude CLI (AI agent backend)
 
-## 安裝
+## Installation
 
-### 方式一：make install（推薦）
+### Option 1: make install (recommended)
 
 ```bash
-make install    # build binary + 初始化 config + MLX env + launchd daemon
+make install    # build binary + init config + MLX env + launchd daemon
 ```
 
-### 方式二：只編譯 binary
+### Option 2: build only
 
 ```bash
 make build      # → ~/go/bin/orch
 ```
 
-### 方式三：setup.sh
+### Option 3: setup.sh
 
 ```bash
-./setup.sh              # 完整安裝（含 MLX daemon）
-./setup.sh --no-daemon  # 不裝 launchd daemon
+./setup.sh              # full install (includes MLX daemon)
+./setup.sh --no-daemon  # skip launchd daemon
 ```
 
-### 確認安裝
+### Verify
 
 ```bash
 orch --version
 orch --tools
 ```
 
-## 使用方式
+## Usage
 
 ```bash
-# Oneshot（一次性任務）
-orch "查 S3 bucket 用量"
+# Oneshot (single task)
+orch "check S3 bucket usage"
 orch "kubectl get nodes"
 
-# Dry-run（只看計畫不執行）
-orch --dry-run "整合 AWS 和 GCP 用量報告"
+# Dry-run (plan only, no execution)
+orch --dry-run "consolidate AWS and GCP usage report"
 
 # Unix pipe
-kubectl get pods -o json | orch "哪些 pod 不健康？"
-cat error.log | orch "分析這個錯誤"
+kubectl get pods -o json | orch "which pods are unhealthy?"
+cat error.log | orch "analyze this error"
 
-# REPL 模式
+# REPL mode
 orch
 
-# 子命令
-orch history                 # 最近 20 筆歷史
-orch history search kubectl  # 搜尋歷史
-orch briefing                # 顯示 briefing
-orch briefing gen            # MLX 自動生成 briefing
+# Subcommands
+orch history                 # last 20 entries
+orch history search kubectl  # search history
+orch briefing                # show briefing
+orch briefing gen            # auto-generate briefing via MLX
 ```
 
-### REPL 內建命令
+### REPL Commands
 
-| 命令 | 說明 |
-|------|------|
-| `/w` | 列出可用工作流 |
-| `/w 1` | 執行第 1 個工作流 |
-| `/h` | 最近 10 筆歷史 |
-| `/b` | 顯示 briefing |
-| `/help` | 列出所有命令 |
+| Command | Description |
+|---------|-------------|
+| `/w` | List available workflows |
+| `/w 1` | Execute workflow #1 |
+| `/h` | Last 10 history entries |
+| `/b` | Show briefing |
+| `/help` | List all commands |
 
-## 架構
+## Architecture
 
 ```
-使用者輸入
+User Input
     ▼
 ┌─────────────────────────────────────┐
 │  Workflow Match                       │  ~/.config/orch/workflows/*.yaml
 └────────────┬────────────────────────┘
-             ▼ 不匹配
+             ▼ no match
 ┌─────────────────────────────────────┐
-│  Layer 1: Keyword Match（⚡ 0ms）    │  直接 shell 指令
+│  Layer 1: Keyword Match (⚡ 0ms)     │  direct shell commands
 └────────────┬────────────────────────┘
-             ▼ 不匹配
+             ▼ no match
 ┌─────────────────────────────────────┐
-│  Layer 2: Local LLM（🍎 ~2-5s）     │  MLX / Ollama
+│  Layer 2: Local LLM (🍎 ~2-5s)      │  MLX / Ollama
 └────────────┬────────────────────────┘
-             ▼ 不可用
+             ▼ unavailable
 ┌─────────────────────────────────────┐
-│  Layer 3: Cloud LLM（☁️ ~5-8s）     │  claude -p fallback
+│  Layer 3: Cloud LLM (☁️ ~5-8s)      │  claude -p fallback
 └─────────────────────────────────────┘
              ▼
 ┌─────────────────────────────────────┐
-│  Executor（DAG 並行調度）             │
+│  Executor (DAG parallel scheduling)  │
 │  goroutine per step + streaming      │
 └─────────────────────────────────────┘
              ▼
 ┌─────────────────────────────────────┐
-│  Memory Layer（SQLite）              │
+│  Memory Layer (SQLite)               │
 └─────────────────────────────────────┘
 ```
 
-## 專案結構
+## Project Structure
 
 ```
 cmd/orch/
-├── main.go          CLI 入口 + signal handler
-├── repl.go          REPL 互動模式
-├── printer.go       事件輸出格式化
+├── main.go          CLI entry + signal handler
+├── repl.go          REPL interactive mode
+├── printer.go       Event output formatting
 └── dag.go           ASCII DAG rendering
 
 pkg/
-├── config/          設定檔載入（YAML → struct）
+├── config/          Config loader (YAML → struct)
 ├── model/           LLM interface + auto-start server
-├── memory/          SQLite 記憶層（7 張表）
-├── registry/        本機工具掃描
-├── planner/         三層路由 + plan 生成
-├── executor/        DAG 並行執行 + streaming + re-plan
-└── workflow/        YAML 工作流模板
+├── memory/          SQLite memory layer (7 tables)
+├── registry/        Local tool scanner
+├── planner/         3-layer routing + plan generation
+├── executor/        DAG parallel execution + streaming + re-plan
+└── workflow/        YAML workflow templates
 
-launchd/             macOS LaunchAgent（MLX daemon）
-config.yaml          設定檔範本
-setup.sh             安裝腳本
+launchd/             macOS LaunchAgent (MLX daemon)
+config.yaml          Config template
+setup.sh             Installation script
 Makefile             build/test/install
 ```
 
-## 設定
+## Configuration
 
-位置：`~/.config/orch/config.yaml`（`ORCH_CONFIG` env 可覆蓋）
+Location: `~/.config/orch/config.yaml` (override with `ORCH_CONFIG` env)
 
 ```yaml
-# 模型設定（支援 MLX / Ollama / 任何 OpenAI-compatible API）
+# Models (supports MLX / Ollama / any OpenAI-compatible API)
 models:
   - name: "qwen-1.5b"
     backend: "mlx"
@@ -153,24 +153,25 @@ models:
     model: "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
     default: true
 
-# 記憶層
+# Memory layer
 memory:
   db_path: "~/.config/orch/orch.db"
   briefing_on_boot: true
   auto_summarize: true
 
-# 工作流目錄
+# Workflow directory
 workflows:
   dir: "~/.config/orch/workflows"
 ```
 
-## 開發
+## Development
 
 ```bash
-make build     # 編譯
-make test      # 跑測試
+make build     # compile
+make test      # run tests
 make lint      # go vet
-make clean     # 清除產物
+make cover     # coverage report
+make clean     # remove artifacts
 ```
 
 ## License

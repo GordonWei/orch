@@ -30,13 +30,13 @@ func main() {
 		return
 	}
 
-	// 載入設定
+	// Load config
 	cfg := config.Load()
 
-	// 掃描工具
+	// Scan tools
 	reg := registry.Scan()
 
-	// 開啟記憶層（SQLite）
+	// Open memory layer (SQLite)
 	store, err := memory.Open(cfg.Memory.DBPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "⚠️  memory db open failed: %v (running without memory)\n", err)
@@ -45,7 +45,7 @@ func main() {
 		defer store.Close()
 	}
 
-	// 設置 signal handler (graceful shutdown)
+	// Signal handler (graceful shutdown)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -55,18 +55,18 @@ func main() {
 		sig := <-sigCh
 		fmt.Fprintf(os.Stderr, "\n⚡ received %v, shutting down...\n", sig)
 		cancel()
-		// 給一點時間讓 goroutine 收尾
+		// Allow goroutines time to clean up
 		time.Sleep(500 * time.Millisecond)
 		os.Exit(130)
 	}()
 
-	// 處理 subcommand（不需要 MLX server）
+	// Handle subcommands (no MLX server needed)
 	if args.subcommand != "" {
 		handleSubcommand(args, cfg, store)
 		return
 	}
 
-	// 自動啟動 MLX server（如果沒在跑）
+	// Auto-start MLX server (if not running)
 	activeModel := cfg.ActiveModel()
 	if activeModel.AutoStart {
 		starter := model.NewStarter(model.StarterConfig{
@@ -86,7 +86,7 @@ func main() {
 		}
 	}
 
-	// 啟動時讀 briefing
+	// Show briefing on boot
 	if store != nil && cfg.Memory.BriefingOnBoot {
 		if brief, t, err := store.GetBriefing(); err == nil && brief != "" {
 			fmt.Fprintf(os.Stderr, "📋 briefing (generated %s):\n   %s\n\n", t.Format("01/02 15:04"), brief)
@@ -162,7 +162,7 @@ func handleHistory(subArgs []string, store *memory.Store) {
 			os.Exit(1)
 		}
 		if len(entries) == 0 {
-			fmt.Println("（無歷史紀錄）")
+			fmt.Println("(no history entries)")
 			return
 		}
 		printHistoryEntries(entries)
@@ -182,7 +182,7 @@ func handleHistory(subArgs []string, store *memory.Store) {
 			os.Exit(1)
 		}
 		if len(entries) == 0 {
-			fmt.Printf("（找不到包含 \"%s\" 的紀錄）\n", keyword)
+			fmt.Printf("(no entries matching \"%s\")\n", keyword)
 			return
 		}
 		printHistoryEntries(entries)
@@ -193,7 +193,7 @@ func handleHistory(subArgs []string, store *memory.Store) {
 			fmt.Fprintf(os.Stderr, "❌ %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("🗑️  已清除 %d 筆歷史紀錄\n", count)
+		fmt.Printf("🗑️  cleared %d history entries\n", count)
 
 	default:
 		fmt.Fprintf(os.Stderr, "Usage: orch history [search <kw> | clear]\n")
@@ -214,7 +214,7 @@ func handleBriefing(subArgs []string, cfg *config.Config, store *memory.Store) {
 			os.Exit(1)
 		}
 		if brief == "" {
-			fmt.Println("（尚無 briefing）")
+			fmt.Println("(no briefing)")
 			return
 		}
 		fmt.Printf("📋 briefing (generated %s):\n   %s\n", t.Format("2006-01-02 15:04"), brief)
@@ -232,7 +232,7 @@ func handleBriefing(subArgs []string, cfg *config.Config, store *memory.Store) {
 			fmt.Fprintf(os.Stderr, "❌ %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Println("✅ briefing 已更新")
+		fmt.Println("✅ briefing updated")
 
 	case "gen":
 		handleBriefingGen(cfg, store)
@@ -250,7 +250,7 @@ func handleBriefingGen(cfg *config.Config, store *memory.Store) {
 		os.Exit(1)
 	}
 	if len(entries) == 0 {
-		fmt.Fprintf(os.Stderr, "⚠️  沒有歷史紀錄可供生成 briefing\n")
+		fmt.Fprintf(os.Stderr, "⚠️  no history entries to generate briefing from\n")
 		os.Exit(1)
 	}
 
@@ -274,25 +274,25 @@ func handleBriefingGen(cfg *config.Config, store *memory.Store) {
 	})
 
 	if !llmClient.Available() {
-		fmt.Fprintf(os.Stderr, "❌ MLX server 不可用，無法生成 briefing\n")
+		fmt.Fprintf(os.Stderr, "❌ MLX server unavailable, cannot generate briefing\n")
 		os.Exit(1)
 	}
 
 	fmt.Fprintf(os.Stderr, "🧠 generating briefing from recent %d tasks...\n", len(entries))
 
-	prompt := fmt.Sprintf(`以下是使用者最近的任務歷史紀錄：
+	prompt := fmt.Sprintf(`Here are the user's recent task history entries:
 
 %s
 
-請用繁體中文寫一段精簡的 briefing（一段話，不超過 200 字），摘要：
-1. 最近主要在做什麼
-2. 哪些成功、哪些失敗
-3. 接下來可能需要關注的事項
+Write a concise briefing (one paragraph, max 200 words) summarizing:
+1. What was mainly worked on recently
+2. What succeeded and what failed
+3. What to focus on next
 
-只輸出 briefing 本文，不要加標題或格式。`, sb.String())
+Output only the briefing text, no titles or formatting.`, sb.String())
 
 	messages := []model.Message{
-		{Role: "system", Content: "你是一個精簡的任務摘要助手。用繁體中文回覆。"},
+		{Role: "system", Content: "You are a concise task summarization assistant."},
 		{Role: "user", Content: prompt},
 	}
 
@@ -311,7 +311,7 @@ func handleBriefingGen(cfg *config.Config, store *memory.Store) {
 		os.Exit(1)
 	}
 
-	fmt.Printf("✅ briefing 已生成並儲存：\n   %s\n", answer)
+	fmt.Printf("✅ briefing generated and saved:\n   %s\n", answer)
 }
 
 // ===== Task Execution =====
@@ -336,7 +336,7 @@ func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, st
 		return
 	}
 
-	// 如果是一般對話，直接用 MLX 回答
+	// Direct chat for simple conversations
 	if plan.Category == "chat" || (len(plan.Steps) == 1 && plan.Steps[0].Agent == "local") {
 		answer, err := p.DirectChat(prompt)
 		if err != nil {
@@ -426,7 +426,7 @@ func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, st
 		}
 	}
 
-	// 4. 寫 history
+	// 4. Write history
 	if store != nil {
 		var outputSummary string
 		if len(result.Steps) > 0 {
@@ -504,7 +504,7 @@ func parseArgs() cliArgs {
 }
 
 func printUsage() {
-	fmt.Fprintf(os.Stderr, `orch %s - AI 幕僚長 CLI
+	fmt.Fprintf(os.Stderr, `orch %s - AI Chief of Staff CLI
 
 Usage:
   orch <prompt>              Oneshot: plan → execute → deliver
@@ -514,20 +514,20 @@ Usage:
   orch --version             Show version
 
 Subcommands:
-  orch history               列出最近 20 筆任務歷史
-  orch history search <kw>   搜尋歷史
-  orch history clear         清除所有歷史
+  orch history               List last 20 task history entries
+  orch history search <kw>   Search history
+  orch history clear         Clear all history
 
-  orch briefing              顯示當前 briefing
-  orch briefing set <text>   手動設定 briefing
-  orch briefing gen          用 MLX 從近期 history 自動生成 briefing
+  orch briefing              Show current briefing
+  orch briefing set <text>   Manually set briefing
+  orch briefing gen          Auto-generate briefing from recent history via MLX
 
 Examples:
-  orch "查 S3 bucket 用量"
-  orch --dry-run "整合 AWS 和 GCP 用量報告"
-  orch "把 litellm helm values 加上 rate limiting"
-  kubectl get pods -o json | orch "哪些 pod 不健康？"
-  cat error.log | orch "分析這個錯誤"
+  orch "check S3 bucket usage"
+  orch --dry-run "consolidate AWS and GCP usage report"
+  orch "add rate limiting to litellm helm values"
+  kubectl get pods -o json | orch "which pods are unhealthy?"
+  cat error.log | orch "analyze this error"
   orch history search "kubectl"
   orch briefing gen
 `, version)

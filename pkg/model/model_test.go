@@ -19,7 +19,7 @@ func TestOpenAIClient_Chat(t *testing.T) {
 				}{
 					{Message: struct {
 						Content string `json:"content"`
-					}{Content: "測試回覆"}},
+					}{Content: "test reply"}},
 				},
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -48,13 +48,13 @@ func TestOpenAIClient_Chat(t *testing.T) {
 
 	// Test Chat
 	reply, err := client.Chat([]Message{
-		{Role: "user", Content: "你好"},
+		{Role: "user", Content: "hello"},
 	}, nil)
 	if err != nil {
 		t.Fatalf("chat failed: %v", err)
 	}
-	if reply != "測試回覆" {
-		t.Errorf("expected '測試回覆', got %q", reply)
+	if reply != "test reply" {
+		t.Errorf("expected 'test reply', got %q", reply)
 	}
 
 	// Test ModelName
