@@ -10,6 +10,7 @@ import (
 
 type Config struct {
 	Persona          Persona             `yaml:"persona"`
+	AIBackend        AIBackendConfig     `yaml:"ai_backend"`
 	LocalLLM         LocalLLM            `yaml:"local_llm"`
 	Models           []ModelDef          `yaml:"models"`
 	Memory           MemoryConfig        `yaml:"memory"`
@@ -17,6 +18,13 @@ type Config struct {
 	Workspace        Workspace           `yaml:"workspace"`
 	Routing          map[string][]string `yaml:"routing"`
 	KeywordShortcuts []KeywordShortcut   `yaml:"keyword_shortcuts"`
+}
+
+// AIBackendConfig defines which AI CLI backend to use for cloud planning/execution.
+type AIBackendConfig struct {
+	// Primary is the preferred AI CLI backend: "kiro", "claude", or "gemini".
+	// If empty or unavailable, auto-detect is used.
+	Primary string `yaml:"primary"`
 }
 
 // WorkflowConfig defines the workflow system configuration.
@@ -137,17 +145,18 @@ func defaultConfig() *Config {
 	return &Config{
 		Persona: Persona{
 			Name:     "orch",
-			Owner:    "Gordon Wei",
-			Language: "zh-TW",
-			SystemPrompt: `You are orch, an AI Chief of Staff CLI tool running on macOS.
-Your owner is Gordon Wei (Head of Infrastructure, momo).
-You coordinate multiple AI agents (kiro, claude, gemini) to complete tasks.
+			Owner:    "",
+			Language: "en",
+			SystemPrompt: `You are orch, an AI task orchestration CLI running on macOS (Apple Silicon).
+You coordinate AI agents to complete tasks efficiently.
 
 Response rules:
-- Reply in Traditional Chinese (zh-TW)
 - Be concise and direct
-- Keep technical terms in English (Kubernetes, Terraform, GKE, etc.)
-- Keep code and commands in English`,
+- Keep technical terms in English
+- If the user's language is detected, reply in the same language`,
+		},
+		AIBackend: AIBackendConfig{
+			Primary: "", // empty = auto-detect
 		},
 		LocalLLM: LocalLLM{
 			Endpoint:   "http://localhost:8080",
@@ -177,15 +186,8 @@ Response rules:
 			Dir: filepath.Join(home, ".config", "orch", "workflows"),
 		},
 		Workspace: Workspace{
-			Root: filepath.Join(home, "Desktop", "Cowork"),
-			Subdirs: []Subdir{
-				{Name: "AWS", Keywords: []string{"aws", "lambda", "s3", "ec2", "sam", "bedrock", "cloudformation"}},
-				{Name: "GCP", Keywords: []string{"gcp", "gke", "litellm", "cloud run", "bigquery", "gcloud"}},
-				{Name: "OnPremise", Keywords: []string{"on-premise", "onpremise", "rke2", "metallb", "gitea", "datacenter", "gateway api"}},
-				{Name: "momo", Keywords: []string{"momo", "weekly", "incident", "performance", "okr", "1-on-1", "manager"}},
-				{Name: "Salesforce", Keywords: []string{"salesforce", "banking", "proposal", "lucy"}},
-				{Name: "Study", Keywords: []string{"study", "notes", "learning", "orchestrator"}},
-			},
+			Root:    "",
+			Subdirs: []Subdir{},
 		},
 		Routing: map[string][]string{
 			"kiro":   {"code", "infra", "aws", "gcp", "terraform", "deploy", "build", "test", "file-ops", "shell"},

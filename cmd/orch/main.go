@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gordonwei/orch/pkg/backend"
 	"github.com/gordonwei/orch/pkg/config"
 	"github.com/gordonwei/orch/pkg/executor"
 	"github.com/gordonwei/orch/pkg/memory"
@@ -64,6 +65,23 @@ func main() {
 	if args.subcommand != "" {
 		handleSubcommand(args, cfg, store)
 		return
+	}
+
+	// Determine backend override: --backend flag > ORCH_BACKEND env > config ai_backend.primary
+	backendOverride := args.backend
+	if backendOverride == "" {
+		backendOverride = os.Getenv("ORCH_BACKEND")
+	}
+	if backendOverride == "" {
+		backendOverride = cfg.AIBackend.Primary
+	}
+
+	// Initialize backend registry (auto-detect available CLIs)
+	br := backend.NewRegistry(backendOverride)
+	if len(br.Available()) > 0 {
+		fmt.Fprintf(os.Stderr, "🤖 %s\n", br.Summary())
+	} else {
+		fmt.Fprintf(os.Stderr, "⚠️  no AI backends detected (install kiro-cli, claude, or gemini for cloud planning)\n")
 	}
 
 	// Auto-start MLX server (if not running)
@@ -122,7 +140,7 @@ func main() {
 	}
 
 	if prompt != "" {
-		runTask(ctx, reg, cfg, store, prompt, args.dryRun)
+		runTask(ctx, reg, cfg, store, br, prompt, args.dryRun)
 		return
 	}
 
@@ -132,7 +150,7 @@ func main() {
 		return
 	}
 
-	runREPL(reg, cfg, store)
+	runREPL(reg, cfg, store, br)
 }
 
 // ===== Subcommand Handlers =====
@@ -143,6 +161,8 @@ func handleSubcommand(args cliArgs, cfg *config.Config, store *memory.Store) {
 		handleHistory(args.subArgs, store)
 	case "briefing":
 		handleBriefing(args.subArgs, cfg, store)
+	case "init":
+		handleInit()
 	default:
 		fmt.Fprintf(os.Stderr, "❌ unknown subcommand: %s\n", args.subcommand)
 		os.Exit(1)
@@ -316,10 +336,10 @@ Output only the briefing text, no titles or formatting.`, sb.String())
 
 // ===== Task Execution =====
 
-func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, store *memory.Store, prompt string, dryRun bool) {
+func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry, prompt string, dryRun bool) {
 	// 1. Plan
 	fmt.Fprintf(os.Stderr, "🧠 planning...\n")
-	p := planner.New(reg, cfg)
+	p := planner.New(reg, cfg, br)
 	plan, err := p.GeneratePlan(prompt)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ planning failed: %v\n", err)
@@ -367,7 +387,7 @@ func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, st
 	outputEvents := make(chan executor.OutputEvent, 256)
 	outputPrinterWg := startOutputPrinter(outputEvents)
 
-	e := executor.New(cfg)
+	e := executor.New(cfg, br)
 	e.EventChan = stepEvents
 	e.OutputEvents = outputEvents
 
@@ -460,6 +480,7 @@ type cliArgs struct {
 	showTools   bool
 	showVersion bool
 	dryRun      bool
+	backend     string // --backend override
 	subcommand  string
 	subArgs     []string
 }
@@ -473,7 +494,7 @@ func parseArgs() cliArgs {
 
 	// Check for subcommands first
 	switch os.Args[1] {
-	case "history", "briefing":
+	case "history", "briefing", "init":
 		args.subcommand = os.Args[1]
 		if len(os.Args) > 2 {
 			args.subArgs = os.Args[2:]
@@ -491,6 +512,11 @@ func parseArgs() cliArgs {
 			args.dryRun = true
 		case "--version", "-v":
 			args.showVersion = true
+		case "--backend":
+			if i+1 < len(os.Args) {
+				i++
+				args.backend = os.Args[i]
+			}
 		case "--help", "-h":
 			printUsage()
 			os.Exit(0)
@@ -504,16 +530,18 @@ func parseArgs() cliArgs {
 }
 
 func printUsage() {
-	fmt.Fprintf(os.Stderr, `orch %s - AI Chief of Staff CLI
+	fmt.Fprintf(os.Stderr, `orch %s - AI Task Orchestration CLI
 
 Usage:
   orch <prompt>              Oneshot: plan → execute → deliver
   orch                       REPL mode: continuous interaction
   orch --tools               Show available tools
   orch --dry-run <prompt>    Plan only, don't execute
+  orch --backend <name>      Override AI backend (kiro/claude/gemini)
   orch --version             Show version
 
 Subcommands:
+  orch init                  Interactive setup wizard
   orch history               List last 20 task history entries
   orch history search <kw>   Search history
   orch history clear         Clear all history
@@ -522,10 +550,15 @@ Subcommands:
   orch briefing set <text>   Manually set briefing
   orch briefing gen          Auto-generate briefing from recent history via MLX
 
+Environment:
+  ORCH_BACKEND               Override AI backend (same as --backend)
+  ORCH_CONFIG                Override config file path
+
 Examples:
+  orch init
   orch "check S3 bucket usage"
+  orch --backend gemini "summarize this doc"
   orch --dry-run "consolidate AWS and GCP usage report"
-  orch "add rate limiting to litellm helm values"
   kubectl get pods -o json | orch "which pods are unhealthy?"
   cat error.log | orch "analyze this error"
   orch history search "kubectl"

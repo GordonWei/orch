@@ -1,25 +1,33 @@
-# orch config
+# orch config template
 # Default path: ~/.config/orch/config.yaml
 # Override with ORCH_CONFIG environment variable
+# Run `orch init` to generate a personalized config interactively.
 
 persona:
   name: "orch"
-  owner: "Gordon Wei"
-  language: "zh-TW"
+  # owner: "Your Name"    # set via `orch init`
+  language: "en"           # en, zh-TW, ja, etc.
   system_prompt: |
-    You are orch, an AI Chief of Staff CLI tool running on macOS.
-    Your owner is Gordon Wei (Head of Infrastructure, momo).
-    You coordinate multiple AI agents (kiro, claude, gemini) to complete tasks.
+    You are orch, an AI task orchestration CLI running on macOS (Apple Silicon).
+    You coordinate AI agents to complete tasks efficiently.
 
     Response rules:
-    - Reply in Traditional Chinese (zh-TW)
     - Be concise and direct
-    - Keep technical terms in English (Kubernetes, Terraform, GKE, etc.)
-    - Keep code and commands in English
+    - Keep technical terms in English
+    - If the user's language is detected, reply in the same language
+
+# === AI Backend Configuration ===
+# Which AI CLI to use for cloud planning and execution.
+# Supports: "kiro", "claude", "gemini"
+# Leave empty for auto-detection (uses first available in order: kiro > claude > gemini)
+# Override at runtime: --backend flag or ORCH_BACKEND env var
+ai_backend:
+  primary: ""    # auto-detect
 
 # === Model Configuration ===
-# Supports MLX, Ollama, or any OpenAI-compatible endpoint
-# The model with `default: true` is used as the primary model
+# Supports MLX, Ollama, or any OpenAI-compatible endpoint.
+# The model with `default: true` is used for local inference (Layer 2).
+# MLX is optional — orch works fine without it (skips to Layer 3).
 models:
   - name: "qwen-1.5b"
     backend: "mlx"
@@ -46,13 +54,6 @@ models:
   #   port: "11434"
   #   default: false
 
-# === Backward compatibility (fallback if models[] is not defined) ===
-local_llm:
-  endpoint: "http://localhost:8080"
-  model: "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
-  python_path: "~/mlx-env/bin/python3"
-  auto_start: true
-
 # === Memory Layer ===
 memory:
   db_path: "~/.config/orch/orch.db"
@@ -61,32 +62,32 @@ memory:
   history_limit: 0          # max history entries (0=unlimited)
 
 # === Workflow Templates ===
-# YAML workflows in this directory are loaded and matched by trigger keyword
-# (bypasses AI planning when matched)
+# YAML workflows in this directory are loaded and matched by trigger keyword.
 workflows:
   dir: "~/.config/orch/workflows"
 
-workspace:
-  root: "~/Desktop/Cowork"
-  subdirs:
-    - name: AWS
-      keywords: [aws, lambda, s3, ec2, sam, bedrock, cloudformation]
-    - name: GCP
-      keywords: [gcp, gke, litellm, cloud run, bigquery, gcloud]
-    - name: OnPremise
-      keywords: [on-premise, onpremise, rke2, metallb, gitea, gateway api]
-    - name: momo
-      keywords: [momo, weekly, incident, performance, okr, 1-on-1]
-    - name: Salesforce
-      keywords: [salesforce, banking, proposal, lucy]
-    - name: Study
-      keywords: [study, notes, learning, orchestrator]
+# === Workspace (optional) ===
+# If set, orch will route tasks to subdirectories based on keyword matching.
+# workspace:
+#   root: "~/projects"
+#   subdirs:
+#     - name: backend
+#       keywords: [api, server, database, python]
+#     - name: frontend
+#       keywords: [react, css, ui, typescript]
+#     - name: infra
+#       keywords: [terraform, kubernetes, aws, gcp]
 
+# === Agent Routing ===
+# Maps categories to preferred AI backend.
+# Used by the planner to suggest which agent handles which task type.
 routing:
   kiro: [code, infra, aws, gcp, terraform, deploy, build, test, file-ops, shell]
   claude: [notion, gcal, gmail, google-workspace, writing, analysis, meeting-notes]
   gemini: [long-context, video, image, summarization, google-drive]
 
+# === Keyword Shortcuts ===
+# Commands matching these prefixes bypass AI planning entirely (Layer 1).
 keyword_shortcuts:
   - prefix: "kubectl"
     category: infra
@@ -112,11 +113,3 @@ keyword_shortcuts:
     category: query
   - prefix: "gcloud container"
     category: query
-
-# === DAG Parallel Execution (for YAML workflows) ===
-# Each step can specify depends_on for multi-upstream dependencies:
-#   depends_on: [step_a, step_b]  → waits for both A and B to complete
-#   depends_on: []                → no dependencies, starts immediately in parallel
-#
-# Backward compatible:
-#   depends_on: "step_1"          → equivalent to depends_on: [step_1]

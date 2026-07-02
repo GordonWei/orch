@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gordonwei/orch/pkg/backend"
 	"github.com/gordonwei/orch/pkg/config"
 	"github.com/gordonwei/orch/pkg/planner"
 )
@@ -76,6 +77,7 @@ type Executor struct {
 	maxRetries int
 	maxRePlans int
 	cfg        *config.Config
+	backendReg *backend.Registry
 	rePlanFunc func(failedContext string) error // callback to trigger re-plan
 
 	// EventChan, if set (non-nil), emits step lifecycle events (start/done/failed) during execution.
@@ -89,12 +91,13 @@ type Executor struct {
 }
 
 // New creates a new Executor instance.
-func New(cfg *config.Config) *Executor {
+func New(cfg *config.Config, br *backend.Registry) *Executor {
 	return &Executor{
 		timeout:    10 * time.Minute,
 		maxRetries: 3,
 		maxRePlans: 2,
 		cfg:        cfg,
+		backendReg: br,
 	}
 }
 
@@ -507,7 +510,7 @@ func (e *Executor) runStep(step planner.Step, priorContext string) (string, erro
 	var cmd *exec.Cmd
 
 	switch step.Agent {
-	case "kiro":
+	case "kiro", "claude", "gemini":
 		prompt := step.Prompt
 		if prompt == "" {
 			prompt = step.Description
@@ -515,24 +518,17 @@ func (e *Executor) runStep(step planner.Step, priorContext string) (string, erro
 		if priorContext != "" {
 			prompt = fmt.Sprintf("Context from prior steps:\n%s\n\nTask: %s", priorContext, prompt)
 		}
-		cmd = exec.CommandContext(ctx, "kiro-cli", "chat", "--trust-all-tools", prompt)
-
-	case "claude":
-		prompt := step.Prompt
-		if prompt == "" {
-			prompt = step.Description
+		// Resolve backend with fallback: if requested agent is unavailable, use primary
+		if e.backendReg == nil {
+			return "", fmt.Errorf("no AI backend registry configured for agent %q", step.Agent)
 		}
-		if priorContext != "" {
-			prompt = fmt.Sprintf("Context from prior steps:\n%s\n\nTask: %s", priorContext, prompt)
+		b := e.backendReg.Resolve(step.Agent)
+		if b == nil {
+			return "", fmt.Errorf("no AI backend available for agent %q", step.Agent)
 		}
-		cmd = exec.CommandContext(ctx, "claude", "-p", prompt)
-
-	case "gemini":
-		prompt := step.Prompt
-		if prompt == "" {
-			prompt = step.Description
-		}
-		cmd = exec.CommandContext(ctx, "gemini", "-p", prompt)
+		workDir := e.findWorkDir(step)
+		output, err := b.Execute(prompt, workDir)
+		return output, err
 
 	case "shell":
 		if step.Command == "" {
@@ -544,6 +540,21 @@ func (e *Executor) runStep(step planner.Step, priorContext string) (string, erro
 		// Run directly as shell command (terraform, kubectl, helm, aws, gcloud)
 		if step.Command != "" {
 			cmd = exec.CommandContext(ctx, "bash", "-c", step.Command)
+		} else if step.Prompt != "" {
+			// No command but has prompt — delegate to primary backend
+			prompt := step.Prompt
+			if priorContext != "" {
+				prompt = fmt.Sprintf("Context from prior steps:\n%s\n\nTask: %s", priorContext, prompt)
+			}
+			if e.backendReg == nil {
+				return "", fmt.Errorf("no AI backend registry configured for agent %q", step.Agent)
+			}
+			b := e.backendReg.Primary()
+			if b == nil {
+				return "", fmt.Errorf("no AI backend available for agent %q", step.Agent)
+			}
+			workDir := e.findWorkDir(step)
+			return b.Execute(prompt, workDir)
 		} else {
 			return "", fmt.Errorf("agent %q has no command or prompt", step.Agent)
 		}

@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
 	"strings"
 
+	"github.com/gordonwei/orch/pkg/backend"
 	"github.com/gordonwei/orch/pkg/config"
 	"github.com/gordonwei/orch/pkg/registry"
 )
@@ -76,14 +76,16 @@ type Plan struct {
 type Planner struct {
 	registry    *registry.Registry
 	cfg         *config.Config
+	backendReg  *backend.Registry
 	mlxEndpoint string
 	mlxModel    string
 }
 
-func New(reg *registry.Registry, cfg *config.Config) *Planner {
+func New(reg *registry.Registry, cfg *config.Config, br *backend.Registry) *Planner {
 	return &Planner{
 		registry:    reg,
 		cfg:         cfg,
+		backendReg:  br,
 		mlxEndpoint: cfg.LocalLLM.Endpoint,
 		mlxModel:    cfg.LocalLLM.Model,
 	}
@@ -109,8 +111,12 @@ func (p *Planner) GeneratePlan(userInput string) (*Plan, error) {
 		}
 	}
 
-	// Layer 3: Cloud LLM (claude -p)
-	fmt.Fprintf(os.Stderr, "   ☁️  routed by: claude (cloud)\n")
+	// Layer 3: Cloud LLM (primary AI backend)
+	primaryName := "none"
+	if p.backendReg.Primary() != nil {
+		primaryName = p.backendReg.PrimaryName()
+	}
+	fmt.Fprintf(os.Stderr, "   ☁️  routed by: %s (cloud)\n", primaryName)
 	return p.tryCloud(userInput)
 }
 
@@ -371,23 +377,20 @@ func looksInvalid(cmd string) bool {
 // ===== Layer 3: Cloud LLM =====
 
 func (p *Planner) tryCloud(userInput string) (*Plan, error) {
+	b := p.backendReg.Primary()
+	if b == nil {
+		return nil, fmt.Errorf("no AI backend available (install kiro-cli, claude, or gemini)")
+	}
+
 	systemPrompt := p.buildSystemPrompt()
 	fullPrompt := fmt.Sprintf("%s\n\nUser request:\n%s", systemPrompt, userInput)
 
-	cmd := exec.Command("claude", "-p", fullPrompt)
-	cmd.Env = append(os.Environ(), "CLAUDE_CODE_ENTRYPOINT=cli")
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("claude failed: %w\nstderr: %s", err, stderr.String())
+	output, err := b.Execute(fullPrompt, "")
+	if err != nil {
+		return nil, fmt.Errorf("%s planning failed: %w", b.Name(), err)
 	}
 
-	raw := stdout.String()
-
-	raw = extractJSON(raw)
+	raw := extractJSON(output)
 
 	var plan Plan
 	if err := json.Unmarshal([]byte(raw), &plan); err != nil {

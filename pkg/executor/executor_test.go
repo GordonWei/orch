@@ -18,7 +18,7 @@ func testConfig() *config.Config {
 
 // TestExecuteShellStep verifies basic execution of a single shell step.
 func TestExecuteShellStep(t *testing.T) {
-	e := New(testConfig())
+	e := New(testConfig(), nil)
 
 	plan := &planner.Plan{
 		TaskSummary: "test echo",
@@ -52,7 +52,7 @@ func TestExecuteShellStep(t *testing.T) {
 
 // TestExecuteMultiStepWithDeps verifies sequential multi-step execution with dependencies.
 func TestExecuteMultiStepWithDeps(t *testing.T) {
-	e := New(testConfig())
+	e := New(testConfig(), nil)
 
 	plan := &planner.Plan{
 		TaskSummary: "multi step",
@@ -88,7 +88,7 @@ func TestExecuteMultiStepWithDeps(t *testing.T) {
 // TestParallelExecution verifies steps without dependencies run in parallel.
 // Three steps sleeping 0.3s should complete in ~0.5s if parallel.
 func TestParallelExecution(t *testing.T) {
-	e := New(testConfig())
+	e := New(testConfig(), nil)
 
 	plan := &planner.Plan{
 		TaskSummary: "parallel test",
@@ -137,7 +137,7 @@ func TestParallelExecution(t *testing.T) {
 // TestDAGDependencyOrder verifies DAG respects dependency order.
 // Step C depends on A and B; A and B run in parallel.
 func TestDAGDependencyOrder(t *testing.T) {
-	e := New(testConfig())
+	e := New(testConfig(), nil)
 
 	plan := &planner.Plan{
 		TaskSummary: "dag order test",
@@ -195,7 +195,7 @@ func TestDAGDependencyOrder(t *testing.T) {
 
 // TestContextChainFromMultipleDeps verifies step receives context from multiple upstreams.
 func TestContextChainFromMultipleDeps(t *testing.T) {
-	e := New(testConfig())
+	e := New(testConfig(), nil)
 
 	plan := &planner.Plan{
 		TaskSummary: "context chain test",
@@ -241,7 +241,7 @@ func TestContextChainFromMultipleDeps(t *testing.T) {
 
 // TestExecuteWithVerify verifies step verify_cmd logic.
 func TestExecuteWithVerify(t *testing.T) {
-	e := New(testConfig())
+	e := New(testConfig(), nil)
 
 	plan := &planner.Plan{
 		TaskSummary: "verify test",
@@ -270,7 +270,7 @@ func TestExecuteWithVerify(t *testing.T) {
 
 // TestExecuteFailedVerify verifies behavior when verify_cmd fails.
 func TestExecuteFailedVerify(t *testing.T) {
-	e := New(testConfig())
+	e := New(testConfig(), nil)
 	e.maxRetries = 1 // reduce wait time
 
 	plan := &planner.Plan{
@@ -297,7 +297,7 @@ func TestExecuteFailedVerify(t *testing.T) {
 
 // TestOnFailureSkip verifies downstream steps still execute when on_failure=skip.
 func TestOnFailureSkip(t *testing.T) {
-	e := New(testConfig())
+	e := New(testConfig(), nil)
 	e.maxRetries = 0
 
 	plan := &planner.Plan{
@@ -342,7 +342,7 @@ func TestOnFailureSkip(t *testing.T) {
 
 // TestOnFailureAbort verifies all pending steps are cancelled when on_failure=abort.
 func TestOnFailureAbort(t *testing.T) {
-	e := New(testConfig())
+	e := New(testConfig(), nil)
 	e.maxRetries = 0
 
 	plan := &planner.Plan{
@@ -379,7 +379,7 @@ func TestOnFailureAbort(t *testing.T) {
 
 // TestOnFailureRePlan verifies re-plan callback is triggered correctly.
 func TestOnFailureRePlan(t *testing.T) {
-	e := New(testConfig())
+	e := New(testConfig(), nil)
 	e.maxRetries = 0
 
 	var rePlanCalled int32
@@ -421,7 +421,7 @@ func TestOnFailureRePlan(t *testing.T) {
 
 // TestCycleDetection verifies cycle detection in dependencies.
 func TestCycleDetection(t *testing.T) {
-	e := New(testConfig())
+	e := New(testConfig(), nil)
 
 	plan := &planner.Plan{
 		TaskSummary: "cycle test",
@@ -454,7 +454,7 @@ func TestCycleDetection(t *testing.T) {
 
 // TestDuplicateStepID verifies duplicate step ID error detection.
 func TestDuplicateStepID(t *testing.T) {
-	e := New(testConfig())
+	e := New(testConfig(), nil)
 
 	plan := &planner.Plan{
 		TaskSummary: "dup id test",
@@ -472,7 +472,7 @@ func TestDuplicateStepID(t *testing.T) {
 
 // TestMissingDependency verifies error when depending on non-existent step ID.
 func TestMissingDependency(t *testing.T) {
-	e := New(testConfig())
+	e := New(testConfig(), nil)
 
 	plan := &planner.Plan{
 		TaskSummary: "missing dep",
@@ -494,7 +494,7 @@ func TestMissingDependency(t *testing.T) {
 
 // TestEventsChan verifies streaming events are sent correctly.
 func TestEventsChan(t *testing.T) {
-	e := New(testConfig())
+	e := New(testConfig(), nil)
 	e.EventChan = make(chan StepEvent, 100) // buffered to avoid blocking
 
 	plan := &planner.Plan{
@@ -551,7 +551,7 @@ func TestEventsChan(t *testing.T) {
 //	   \ /
 //	    D
 func TestDiamondDAG(t *testing.T) {
-	e := New(testConfig())
+	e := New(testConfig(), nil)
 
 	plan := &planner.Plan{
 		TaskSummary: "diamond DAG",
@@ -583,7 +583,7 @@ func TestDiamondDAG(t *testing.T) {
 
 // TestExecuteUnknownAgent verifies error handling for unknown agent.
 func TestExecuteUnknownAgent(t *testing.T) {
-	e := New(testConfig())
+	e := New(testConfig(), nil)
 	e.maxRetries = 0
 
 	plan := &planner.Plan{
@@ -621,7 +621,7 @@ func TestTruncate(t *testing.T) {
 
 // TestNoDepsRunsImmediately verifies empty DependsOn runs immediately (backward compat).
 func TestNoDepsRunsImmediately(t *testing.T) {
-	e := New(testConfig())
+	e := New(testConfig(), nil)
 
 	plan := &planner.Plan{
 		TaskSummary: "no deps",

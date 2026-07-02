@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/chzyer/readline"
+	"github.com/gordonwei/orch/pkg/backend"
 	"github.com/gordonwei/orch/pkg/config"
 	"github.com/gordonwei/orch/pkg/executor"
 	"github.com/gordonwei/orch/pkg/memory"
@@ -14,7 +15,7 @@ import (
 	"github.com/gordonwei/orch/pkg/workflow"
 )
 
-func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store) {
+func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry) {
 	rl, err := readline.NewEx(&readline.Config{
 		Prompt:          "› ",
 		HistoryFile:     os.Getenv("HOME") + "/.orch_history",
@@ -56,11 +57,11 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store) {
 
 		// Slash command
 		if strings.HasPrefix(input, "/") {
-			handleSlashCommand(rl, reg, cfg, store, input)
+			handleSlashCommand(rl, reg, cfg, store, br, input)
 			continue
 		}
 
-		runTask(nil, reg, cfg, store, input, false)
+		runTask(nil, reg, cfg, store, br, input, false)
 		fmt.Fprintln(os.Stderr)
 	}
 
@@ -69,7 +70,7 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store) {
 
 // ===== REPL Slash Commands =====
 
-func handleSlashCommand(rl *readline.Instance, reg *registry.Registry, cfg *config.Config, store *memory.Store, input string) {
+func handleSlashCommand(rl *readline.Instance, reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry, input string) {
 	parts := strings.Fields(input)
 	cmd := strings.ToLower(parts[0])
 	args := parts[1:]
@@ -80,9 +81,9 @@ func handleSlashCommand(rl *readline.Instance, reg *registry.Registry, cfg *conf
 
 	case "/w", "/workflows":
 		if len(args) > 0 {
-			handleWorkflowExec(rl, reg, cfg, store, args[0])
+			handleWorkflowExec(rl, reg, cfg, store, br, args[0])
 		} else {
-			handleWorkflowMenu(rl, reg, cfg, store)
+			handleWorkflowMenu(rl, reg, cfg, store, br)
 		}
 
 	case "/h", "/history":
@@ -110,7 +111,7 @@ func printREPLHelp() {
 `)
 }
 
-func handleWorkflowMenu(rl *readline.Instance, reg *registry.Registry, cfg *config.Config, store *memory.Store) {
+func handleWorkflowMenu(rl *readline.Instance, reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry) {
 	workflows, err := workflow.LoadAll(cfg.Workflows.Dir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ failed to load workflows: %v\n", err)
@@ -142,10 +143,10 @@ func handleWorkflowMenu(rl *readline.Instance, reg *registry.Registry, cfg *conf
 		return
 	}
 
-	handleWorkflowExec(rl, reg, cfg, store, choice)
+	handleWorkflowExec(rl, reg, cfg, store, br, choice)
 }
 
-func handleWorkflowExec(rl *readline.Instance, reg *registry.Registry, cfg *config.Config, store *memory.Store, numStr string) {
+func handleWorkflowExec(rl *readline.Instance, reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry, numStr string) {
 	idx, err := strconv.Atoi(numStr)
 	if err != nil || idx < 1 {
 		fmt.Fprintf(os.Stderr, "❌ invalid workflow number: %s\n", numStr)
@@ -179,7 +180,7 @@ func handleWorkflowExec(rl *readline.Instance, reg *registry.Registry, cfg *conf
 	outputEvents := make(chan executor.OutputEvent, 256)
 	outputPrinterWg := startOutputPrinter(outputEvents)
 
-	e := executor.New(cfg)
+	e := executor.New(cfg, br)
 	e.EventChan = stepEvents
 	e.OutputEvents = outputEvents
 
