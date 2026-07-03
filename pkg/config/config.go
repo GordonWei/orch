@@ -160,16 +160,16 @@ Response rules:
 		},
 		LocalLLM: LocalLLM{
 			Endpoint:   "http://localhost:8080",
-			Model:      "mlx-community/Qwen2.5-1.5B-Instruct-4bit",
+			Model:      "mlx-community/Qwen2.5-3B-Instruct-4bit",
 			PythonPath: filepath.Join(home, "mlx-env", "bin", "python3"),
 			AutoStart:  true,
 		},
 		Models: []ModelDef{
 			{
-				Name:       "qwen-1.5b",
+				Name:       "qwen-3b",
 				Backend:    "mlx",
 				Endpoint:   "http://localhost:8080",
-				Model:      "mlx-community/Qwen2.5-1.5B-Instruct-4bit",
+				Model:      "mlx-community/Qwen2.5-3B-Instruct-4bit",
 				PythonPath: filepath.Join(home, "mlx-env", "bin", "python3"),
 				AutoStart:  true,
 				Port:       "8080",

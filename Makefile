@@ -1,6 +1,6 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 BINARY  := orch
-INSTALL := $(HOME)/go/bin/$(BINARY)
+INSTALL := /usr/local/bin/$(BINARY)
 LDFLAGS := -ldflags "-X main.version=$(VERSION)"
 
 .PHONY: build test lint clean install setup
@@ -21,10 +21,9 @@ lint:
 clean:
 	rm -f $(BINARY) coverage.out coverage.html
 
-## install: 編譯 + 安裝到 ~/go/bin + 初始化設定
+## install: 編譯 + 安裝到 /usr/local/bin + 初始化設定
 install: build
-	@mkdir -p $(HOME)/go/bin
-	cp $(BINARY) $(INSTALL)
+	@sudo cp $(BINARY) $(INSTALL)
 	@echo "✅ installed: $(INSTALL) ($(VERSION))"
 	@mkdir -p $(HOME)/.config/orch
 	@if [ ! -f $(HOME)/.config/orch/config.yaml ]; then \

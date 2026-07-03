@@ -24,8 +24,10 @@ echo "=== orch setup ==="
 # 1. Go binary
 echo "[1/$STEPS] Building orch binary..."
 VERSION="${ORCH_VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo "dev")}"
-go build -ldflags "-X main.version=${VERSION}" -o ~/go/bin/orch ./cmd/orch/
-echo "   ✅ ~/go/bin/orch (${VERSION})"
+go build -ldflags "-X main.version=${VERSION}" -o orch ./cmd/orch/
+sudo cp orch /usr/local/bin/orch
+rm -f orch
+echo "   ✅ /usr/local/bin/orch (${VERSION})"
 
 # 2. Config
 echo "[2/$STEPS] Setting up config..."

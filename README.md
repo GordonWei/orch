@@ -2,7 +2,7 @@
 
 A single CLI entry point: describe what you need, and it plans, dispatches, executes, verifies, and delivers.
 
-**MLX on Apple Silicon as the primary engine** — local inference handles most tasks without cloud calls. Cloud AI backends (kiro/claude/gemini) serve as fallback for complex planning.
+**MLX on Apple Silicon as the primary engine** — local inference handles routing and simple chat without cloud calls. Cloud AI backends (kiro/claude/gemini) serve as fallback for complex tasks.
 
 ## Origin
 
@@ -12,7 +12,7 @@ The core idea: instead of manually switching between different AI CLI tools (kir
 
 What makes this version different:
 
-1. **Local-first with MLX** — A small LLM (Qwen 2.5 1.5B) running locally on Apple Silicon handles routing and simple tasks in ~2-5 seconds. No cloud calls, no API costs, no latency for everyday use.
+1. **Local-first with MLX** — A small LLM (Qwen 2.5 3B) running locally on Apple Silicon handles task classification and simple chat in <1 second. No cloud calls, no API costs, no latency for everyday use.
 2. **Cloud as fallback** — Only when the local model can't handle complex multi-step planning does it escalate to a subscribed AI CLI (kiro, claude, or gemini — whichever you have).
 3. **Single binary, zero runtime dependencies** — Written in Go. No Node.js, no Python venv to manage (except for MLX inference itself). Just build and run.
 4. **CLI-native** — Works with Unix pipes, integrates into existing shell workflows, and respects the terminal as the primary interface.
@@ -27,7 +27,7 @@ User Input
 └────────────┬────────────────────────┘
              ▼ no match
 ┌─────────────────────────────────────┐
-│  Layer 2: MLX Local LLM (🍎 ~2-5s)  │  plan generation + simple Q&A
+│  Layer 2: MLX Local LLM (🍎 <1s)    │  classification routing + simple chat
 └────────────┬────────────────────────┘
              ▼ complex task / MLX fails
 ┌─────────────────────────────────────┐
@@ -42,6 +42,16 @@ User Input
 │  Memory Layer (SQLite)               │
 └─────────────────────────────────────┘
 ```
+
+### Layer 2 Design: Classification, Not Generation
+
+Small models (≤3B) are unreliable at generating structured output (JSON). Instead of asking the local LLM to produce a full execution plan, Layer 2 uses a **classification-only approach**:
+
+1. **Chat detection** — Common greetings and Q&A patterns are caught by keyword matching before even calling MLX
+2. **MLX classification** — The model outputs only `agent:category` (e.g., `kiro:infra`), a single token pair that's nearly impossible to corrupt
+3. **Plan assembly** — The program constructs the execution plan from the classification result
+
+For direct chat (category=chat), the local model generates a free-text response with **repetition truncation**: if the output degenerates into loops (common with small models), it's automatically cut at the last coherent point.
 
 ## Design Philosophy: Lightweight Router vs Heavy Framework
 
@@ -128,7 +138,7 @@ orch "signoff"                           # YAML workflow: kiro handoff → claud
 | 5% complex (multi-step DAG) | ~$1-2 |
 | **vs. ORCH with 5 agents** | **$4-20/run** |
 
-The key insight: most daily work is simple enough for a 1.5B parameter model running locally. You only pay for cloud when you genuinely need it.
+The key insight: most daily work is simple enough for a 3B parameter model running locally. You only pay for cloud when you genuinely need it.
 
 ## Requirements
 
@@ -154,13 +164,8 @@ Verify: `go version` should show 1.22+.
 ```bash
 git clone https://github.com/GordonWei/orch.git
 cd orch
-make build    # compiles → ~/go/bin/orch
-```
-
-If `~/go/bin` isn't in your PATH, add to `~/.zshrc`:
-
-```bash
-export PATH="$HOME/go/bin:$PATH"
+make build    # compiles → ./orch
+make install  # installs → /usr/local/bin/orch (requires sudo)
 ```
 
 ### 3. Set up MLX environment
@@ -220,11 +225,12 @@ If you just want to try it quickly without the daemon:
 
 ```bash
 # Build
-go build -o ~/go/bin/orch ./cmd/orch
+go build -o orch ./cmd/orch
+sudo cp orch /usr/local/bin/orch
 
 # Start MLX server manually (in another terminal)
 ~/mlx-env/bin/python3 -m mlx_lm.server \
-  --model mlx-community/Qwen2.5-1.5B-Instruct-4bit --port 8080
+  --model mlx-community/Qwen2.5-3B-Instruct-4bit --port 8080
 
 # Run
 orch init
@@ -240,6 +246,9 @@ orch "kubectl get nodes"
 
 # Override backend for one command
 orch --backend gemini "summarize this 200-page doc"
+
+# Verbose mode (show MLX debug output)
+orch --verbose "check system status"
 
 # Dry-run (plan only, no execution)
 orch --dry-run "consolidate AWS and GCP usage report"
@@ -294,21 +303,21 @@ ai_backend:
 
 ```yaml
 models:
-  - name: "qwen-1.5b"
+  - name: "mlx-default"
     backend: "mlx"
     endpoint: "http://localhost:8080"
-    model: "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+    model: "mlx-community/Qwen2.5-3B-Instruct-4bit"
     python_path: "~/mlx-env/bin/python3"
     auto_start: true
     port: "8080"
     default: true
 ```
 
-To use a larger model (better accuracy, slower):
+To use a smaller model (less RAM, faster but less accurate):
 
 ```yaml
-  - name: "qwen-3b"
-    model: "mlx-community/Qwen2.5-3B-Instruct-4bit"
+  - name: "qwen-1.5b"
+    model: "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
 ```
 
 ### Workspace Routing (optional)
@@ -357,7 +366,7 @@ pkg/
 ├── model/           Local LLM interface (OpenAI-compatible) + MLX auto-start
 ├── memory/          SQLite memory layer (history + briefing)
 ├── registry/        Local tool scanner (which CLIs are on this machine)
-├── planner/         3-layer routing + JSON plan generation
+├── planner/         3-layer routing: keyword → MLX classification → cloud planning
 ├── executor/        DAG parallel execution engine (goroutines)
 └── workflow/        YAML workflow template loader
 
@@ -387,7 +396,7 @@ ls ~/mlx-env/bin/python3
 
 # Start manually to see errors
 ~/mlx-env/bin/python3 -m mlx_lm.server \
-  --model mlx-community/Qwen2.5-1.5B-Instruct-4bit --port 8080
+  --model mlx-community/Qwen2.5-3B-Instruct-4bit --port 8080
 
 # Port conflict
 lsof -i :8080

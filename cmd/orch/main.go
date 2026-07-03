@@ -22,9 +22,11 @@ import (
 
 // version is set at build time via -ldflags "-X main.version=v0.4"
 var version = "dev"
+var verbose bool
 
 func main() {
 	args := parseArgs()
+	verbose = args.verbose
 
 	// --version flag
 	if args.showVersion {
@@ -359,6 +361,7 @@ func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, st
 	// 1. Plan
 	fmt.Fprintf(os.Stderr, "🧠 planning...\n")
 	p := planner.New(reg, cfg, br)
+	p.Verbose = verbose
 	plan, err := p.GeneratePlan(prompt)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ planning failed: %v\n", err)
@@ -611,6 +614,7 @@ type cliArgs struct {
 	showTools   bool
 	showVersion bool
 	dryRun      bool
+	verbose     bool
 	backend     string // --backend override
 	subcommand  string
 	subArgs     []string
@@ -641,6 +645,8 @@ func parseArgs() cliArgs {
 			args.showTools = true
 		case "--dry-run":
 			args.dryRun = true
+		case "--verbose":
+			args.verbose = true
 		case "--version", "-v":
 			args.showVersion = true
 		case "--backend":
@@ -668,6 +674,7 @@ Usage:
   orch                       REPL mode: continuous interaction
   orch --tools               Show available tools
   orch --dry-run <prompt>    Plan only, don't execute
+  orch --verbose <prompt>    Show detailed MLX debug output
   orch --backend <name>      Override AI backend (kiro/claude/gemini)
   orch --version             Show version
 

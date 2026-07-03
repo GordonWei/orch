@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/gordonwei/orch/pkg/backend"
@@ -79,6 +80,7 @@ type Planner struct {
 	backendReg  *backend.Registry
 	mlxEndpoint string
 	mlxModel    string
+	Verbose     bool
 }
 
 func New(reg *registry.Registry, cfg *config.Config, br *backend.Registry) *Planner {
@@ -107,7 +109,11 @@ func (p *Planner) GeneratePlan(userInput string) (*Plan, error) {
 		}
 		// MLX failed, fallback to cloud
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "   ⚠️  MLX failed: %v, falling back to cloud\n", err)
+			if p.Verbose {
+				fmt.Fprintf(os.Stderr, "   ⚠️  MLX failed: %v, falling back to cloud\n", err)
+			} else {
+				fmt.Fprintf(os.Stderr, "   ⚠️  MLX routing failed, falling back to cloud\n")
+			}
 		}
 	}
 
@@ -124,6 +130,23 @@ func (p *Planner) GeneratePlan(userInput string) (*Plan, error) {
 
 func (p *Planner) tryKeywordPlan(input string) *Plan {
 	lower := strings.ToLower(input)
+
+	// Chat/greeting detection — route directly to local agent, skip MLX planning
+	if looksLikeChat(input) {
+		return &Plan{
+			TaskSummary: input,
+			Difficulty:  "simple",
+			Category:    "chat",
+			Steps: []Step{
+				{
+					ID:          "step_1",
+					Description: input,
+					Agent:       "local",
+					Prompt:      input,
+				},
+			},
+		}
+	}
 
 	for _, sc := range p.cfg.KeywordShortcuts {
 		if strings.HasPrefix(lower, strings.ToLower(sc.Prefix)) {
@@ -159,29 +182,30 @@ func (p *Planner) mlxAvailable() bool {
 }
 
 func (p *Planner) tryMLX(userInput string) (*Plan, error) {
-	toolsSummary := p.registry.Summary()
+	// Strategy: ask the small model to output ONLY a classification line.
+	// Format: "agent:category" e.g., "local:chat", "kiro:infra", "claude:docs"
+	// This is far more reliable than asking a 3B model to generate valid JSON.
 
-	systemPrompt := fmt.Sprintf(`You are a task router. Given a user request, output a JSON execution plan.
+	systemPrompt := `You are a task classifier. Given a user request, output EXACTLY one line with the format:
+agent:category
 
-Available tools: %s
+AGENTS: local, kiro, claude, gemini, shell
+CATEGORIES: chat, infra, code, docs, query, meeting, deploy
 
 RULES:
-1. You are ONLY a router. Do NOT invent shell commands.
-2. If the user typed an exact CLI command (kubectl, helm, terraform, aws, gcloud, ls, etc.) → agent "shell", put user input in "command".
-3. If the user asks a question or wants information → agent "local", category "chat", put answer in "prompt".
-4. For tasks needing AI reasoning → agent "claude" with a "prompt" describing the task.
-5. Never put text in "command" unless it is a real executable shell command.
-6. "verify_cmd" must be empty string unless you have a real verification command.
+- local:chat → greetings, Q&A, simple conversations, self-introduction
+- shell:infra → user typed an exact CLI command (kubectl, helm, terraform, aws, gcloud, docker, git, ls, etc.)
+- kiro:infra → infrastructure tasks described in natural language (AWS, GCP, kubernetes, terraform)
+- kiro:code → code generation, debugging, file operations, build, test
+- claude:docs → writing, analysis, meeting notes, Notion sync
+- claude:query → complex questions needing deep reasoning
+- gemini:docs → very long document summarization
 
-AGENT SELECTION:
-- claude: complex tasks, Notion, writing, analysis
-- kiro: code, infra, AWS, GCP, terraform, kubernetes
-- gemini: very long documents, video, image
-- shell: user typed an exact command to run
-- local: simple Q&A, chat, greetings
-
-OUTPUT FORMAT (valid JSON only, no markdown):
-{"task_summary":"one line","difficulty":"simple","category":"infra","steps":[{"id":"step_1","description":"what to do","agent":"claude","prompt":"task description","command":"","verify_cmd":""}]}`, toolsSummary)
+OUTPUT ONLY ONE LINE. No explanation. No JSON. No markdown. Example outputs:
+local:chat
+kiro:infra
+shell:infra
+claude:docs`
 
 	reqBody := map[string]interface{}{
 		"model": p.mlxModel,
@@ -189,8 +213,9 @@ OUTPUT FORMAT (valid JSON only, no markdown):
 			{"role": "system", "content": systemPrompt},
 			{"role": "user", "content": userInput},
 		},
-		"max_tokens":  1024,
-		"temperature": 0.1,
+		"max_tokens":         20,
+		"temperature":        0.05,
+		"repetition_penalty": 1.2,
 	}
 
 	body, err := json.Marshal(reqBody)
@@ -224,21 +249,179 @@ OUTPUT FORMAT (valid JSON only, no markdown):
 		return nil, fmt.Errorf("mlx returned no choices")
 	}
 
+	raw := strings.TrimSpace(result.Choices[0].Message.Content)
+
+	// Parse "agent:category" format
+	agent, category := parseClassification(raw)
+
+	if p.Verbose {
+		fmt.Fprintf(os.Stderr, "   🔍 MLX classification raw: %q → agent=%s, category=%s\n", raw, agent, category)
+	}
+
+	// Build plan from classification
+	plan := &Plan{
+		TaskSummary: userInput,
+		Difficulty:  "simple",
+		Category:    category,
+		Steps: []Step{
+			{
+				ID:          "step_1",
+				Description: userInput,
+				Agent:       agent,
+				Prompt:      userInput,
+			},
+		},
+	}
+
+	// If agent is shell, put input as command
+	if agent == "shell" {
+		plan.Steps[0].Command = userInput
+		plan.Steps[0].Prompt = ""
+	}
+
+	return plan, nil
+}
+
+// parseClassification extracts agent and category from MLX output.
+// Expected format: "agent:category" but handles various garbage gracefully.
+func parseClassification(raw string) (agent string, category string) {
+	// Default fallback
+	agent = "local"
+	category = "chat"
+
+	// Take only the first line
+	lines := strings.Split(raw, "\n")
+	first := strings.TrimSpace(lines[0])
+
+	// Remove any surrounding quotes or backticks
+	first = strings.Trim(first, "`\"'")
+
+	// Split on colon
+	parts := strings.SplitN(first, ":", 2)
+	if len(parts) == 2 {
+		a := strings.TrimSpace(strings.ToLower(parts[0]))
+		c := strings.TrimSpace(strings.ToLower(parts[1]))
+
+		// Validate agent
+		validAgents := map[string]bool{"local": true, "kiro": true, "claude": true, "gemini": true, "shell": true}
+		if validAgents[a] {
+			agent = a
+		}
+
+		// Validate category
+		validCategories := map[string]bool{"chat": true, "infra": true, "code": true, "docs": true, "query": true, "meeting": true, "deploy": true}
+		if validCategories[c] {
+			category = c
+		}
+	}
+
+	return agent, category
+}
+
+// salvagePlan extracts a usable plan from malformed JSON using regex.
+// This is the last resort when the small model produces unparseable JSON.
+var (
+	reAgent    = regexp.MustCompile(`"agent"\s*:\s*"([^"]+)"`)
+	reCategory = regexp.MustCompile(`"category"\s*:\s*"([^"]+)"`)
+	rePrompt   = regexp.MustCompile(`"prompt"\s*:\s*"([^"]*)"`)
+	reCommand  = regexp.MustCompile(`"command"\s*:\s*"([^"]*)"`)
+)
+
+func salvagePlan(raw string, userInput string) *Plan {
+	// Extract agent
+	agent := "local"
+	if m := reAgent.FindStringSubmatch(raw); len(m) > 1 {
+		agent = m[1]
+	}
+
+	// Extract category
+	category := "chat"
+	if m := reCategory.FindStringSubmatch(raw); len(m) > 1 {
+		category = m[1]
+	}
+
+	// Extract prompt
+	prompt := userInput
+	if m := rePrompt.FindStringSubmatch(raw); len(m) > 1 && m[1] != "" {
+		prompt = m[1]
+	}
+
+	// Extract command
+	command := ""
+	if m := reCommand.FindStringSubmatch(raw); len(m) > 1 {
+		command = m[1]
+	}
+
+	// Build a valid plan from salvaged fields
+	step := Step{
+		ID:          "step_1",
+		Description: userInput,
+		Agent:       agent,
+		Prompt:      prompt,
+		Command:     command,
+	}
+
+	return &Plan{
+		TaskSummary: userInput,
+		Difficulty:  "simple",
+		Category:    category,
+		Steps:       []Step{step},
+	}
+}
+
+// tryMLXOnce makes a single MLX call with the given temperature and parses the result.
+func (p *Planner) tryMLXOnce(userInput string, systemPrompt string, temp float64) (*Plan, error) {
+	reqBody := map[string]interface{}{
+		"model": p.mlxModel,
+		"messages": []map[string]string{
+			{"role": "system", "content": systemPrompt},
+			{"role": "user", "content": userInput},
+		},
+		"max_tokens":              1024,
+		"temperature":             temp,
+		"repetition_penalty":      1.3,
+		"repetition_context_size": 128,
+	}
+
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := http.Post(p.mlxEndpoint+"/v1/chat/completions", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	if len(result.Choices) == 0 {
+		return nil, fmt.Errorf("no choices in retry")
+	}
+
 	raw := extractJSON(result.Choices[0].Message.Content)
 
 	var plan Plan
 	if err := json.Unmarshal([]byte(raw), &plan); err != nil {
-		return nil, fmt.Errorf("mlx JSON parse failed: %w\nraw: %s", err, raw)
+		return nil, fmt.Errorf("retry parse failed: %w", err)
 	}
 
 	if len(plan.Steps) == 0 {
-		return nil, fmt.Errorf("mlx returned plan with no steps")
+		return nil, fmt.Errorf("retry returned no steps")
 	}
 
-	// Post-processing: fix common mistakes from small models
-	// If shell step's command is not the user's original input, reroute to kiro
 	plan = *p.fixPlan(&plan, userInput)
-
 	return &plan, nil
 }
 
@@ -309,6 +492,51 @@ func (p *Planner) fixPlan(plan *Plan, userInput string) *Plan {
 }
 
 // looksLikeNaturalLanguage checks whether input is natural language (not a direct CLI command)
+// looksLikeChat detects simple chat/greeting inputs that don't need AI planning.
+func looksLikeChat(input string) bool {
+	lower := strings.ToLower(input)
+
+	// Chinese chat patterns
+	chatPatterns := []string{
+		"介紹", "你好", "嗨", "哈囉", "早安", "午安", "晚安",
+		"你是誰", "你是谁", "是什麼", "是什么",
+		"謝謝", "谢谢", "感謝",
+		"再見", "掰掰", "拜拜",
+		"幫我", "請問", "请问",
+		"什麼是", "什么是", "怎麼", "怎么",
+		"可以嗎", "可以吗", "好不好",
+	}
+	for _, p := range chatPatterns {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+
+	// English chat patterns
+	engPatterns := []string{
+		"hello", "hi ", "hey ", "who are you", "introduce",
+		"thank", "bye", "good morning", "good night",
+		"what is", "what are", "how do", "how to",
+		"can you", "please",
+	}
+	for _, p := range engPatterns {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+
+	// Very short input (< 20 chars) with Chinese → likely chat
+	if len([]rune(input)) <= 20 {
+		for _, r := range input {
+			if r >= 0x4e00 && r <= 0x9fff {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 func looksLikeNaturalLanguage(input string) bool {
 	trimmed := strings.TrimSpace(input)
 
@@ -449,8 +677,10 @@ func (p *Planner) DirectChat(userInput string) (string, error) {
 			{"role": "system", "content": systemPrompt},
 			{"role": "user", "content": userInput},
 		},
-		"max_tokens":  2048,
-		"temperature": 0.7,
+		"max_tokens":         2048,
+		"temperature":        0.7,
+		"repetition_penalty": 1.3,
+		"repetition_context_size": 128,
 	}
 
 	body, err := json.Marshal(reqBody)
@@ -480,7 +710,74 @@ func (p *Planner) DirectChat(userInput string) (string, error) {
 		return "", fmt.Errorf("no response from MLX")
 	}
 
-	return result.Choices[0].Message.Content, nil
+	output := truncateRepetition(result.Choices[0].Message.Content)
+	if output == "" {
+		return "", fmt.Errorf("MLX output was entirely repetitive")
+	}
+	return output, nil
+}
+
+// truncateRepetition detects repetitive output from small models and truncates
+// at the point where repetition begins, keeping only the valid prefix.
+func truncateRepetition(s string) string {
+	// Strategy 1: detect repeated words/tokens
+	// Split into words, find where the same word appears N+ times consecutively
+	words := strings.Fields(s)
+	if len(words) < 5 {
+		return s // too short to have repetition issues
+	}
+
+	// Find the first position where a word repeats 4+ times consecutively
+	cutAt := -1
+	for i := 0; i < len(words)-3; i++ {
+		count := 1
+		for j := i + 1; j < len(words); j++ {
+			if words[j] == words[i] {
+				count++
+			} else {
+				break
+			}
+		}
+		if count >= 4 {
+			cutAt = i
+			break
+		}
+	}
+
+	if cutAt > 0 {
+		// Keep everything before the repetition
+		result := strings.Join(words[:cutAt], " ")
+		return strings.TrimSpace(result)
+	}
+
+	// Strategy 2: detect repeated phrases (2-5 word ngrams)
+	for ngram := 2; ngram <= 5; ngram++ {
+		if len(words) < ngram*3 {
+			continue
+		}
+		for i := 0; i <= len(words)-ngram*3; i++ {
+			phrase := strings.Join(words[i:i+ngram], " ")
+			// Count consecutive occurrences of this phrase
+			count := 1
+			pos := i + ngram
+			for pos+ngram <= len(words) {
+				next := strings.Join(words[pos:pos+ngram], " ")
+				if next == phrase {
+					count++
+					pos += ngram
+				} else {
+					break
+				}
+			}
+			if count >= 3 {
+				// Truncate at first occurrence of repeated phrase
+				result := strings.Join(words[:i+ngram], " ")
+				return strings.TrimSpace(result)
+			}
+		}
+	}
+
+	return s
 }
 
 // ===== Helpers =====
@@ -506,5 +803,143 @@ func extractJSON(s string) string {
 		s = s[start : end+1]
 	}
 
+	// Sanitize: remove lines that break JSON structure (non-ASCII garbage outside quotes)
+	s = sanitizeJSON(s)
+
+	// Fix common JSON errors from small models
+	s = fixJSON(s)
+
 	return strings.TrimSpace(s)
+}
+
+// sanitizeJSON attempts to fix common small-model JSON corruption:
+// removes lines that are pure non-ASCII garbage (not part of any JSON key-value structure).
+func sanitizeJSON(s string) string {
+	lines := strings.Split(s, "\n")
+	var cleaned []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		// Skip empty lines
+		if trimmed == "" {
+			cleaned = append(cleaned, line)
+			continue
+		}
+		// If line contains a colon (key:value pair) or structural JSON chars, keep it
+		if strings.Contains(trimmed, ":") || strings.ContainsAny(trimmed, "{}[],") {
+			cleaned = append(cleaned, line)
+			continue
+		}
+		// Line has no JSON structure — check if it's just garbage text
+		hasNonASCII := false
+		for _, r := range trimmed {
+			if r > 127 {
+				hasNonASCII = true
+				break
+			}
+		}
+		if hasNonASCII {
+			// Pure garbage line, drop it
+			continue
+		}
+		cleaned = append(cleaned, line)
+	}
+	return strings.Join(cleaned, "\n")
+}
+
+// fixJSON fixes common JSON errors produced by small models:
+// - Single quotes → double quotes (outside already-double-quoted strings)
+// - Trailing commas before } or ]
+func fixJSON(s string) string {
+	// Step 1: Replace triple quotes """ with single "
+	s = strings.ReplaceAll(s, `"""`, `""`)
+	// Then fix empty strings that became "" → ""  (already valid, leave it)
+
+	// Step 2: Replace single-quoted values: 'value' → "value"
+	var buf strings.Builder
+	inDoubleQuote := false
+	runes := []rune(s)
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		if r == '\\' && inDoubleQuote && i+1 < len(runes) {
+			buf.WriteRune(r)
+			i++
+			buf.WriteRune(runes[i])
+			continue
+		}
+		if r == '"' {
+			inDoubleQuote = !inDoubleQuote
+			buf.WriteRune(r)
+			continue
+		}
+		if r == '\'' && !inDoubleQuote {
+			buf.WriteRune('"')
+			continue
+		}
+		buf.WriteRune(r)
+	}
+	s = buf.String()
+
+	// Step 3: Fix unquoted keys — e.g., `steps:` → `"steps":`
+	// Match pattern: beginning of line, optional whitespace, bare word, colon
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		// Skip lines that already have quoted keys or are structural
+		if strings.HasPrefix(trimmed, "\"") || trimmed == "{" || trimmed == "}" ||
+			trimmed == "[" || trimmed == "]" || trimmed == "}," || trimmed == "]," {
+			continue
+		}
+		// Look for `word:` or `word :` pattern at start
+		colonIdx := strings.Index(trimmed, ":")
+		if colonIdx > 0 {
+			key := strings.TrimSpace(trimmed[:colonIdx])
+			// Only fix if key is a simple identifier (letters, digits, underscore)
+			if isSimpleIdent(key) {
+				indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+				rest := trimmed[colonIdx:]
+				lines[i] = fmt.Sprintf("%s\"%s\"%s", indent, key, rest)
+			}
+		}
+	}
+	s = strings.Join(lines, "\n")
+
+	// Step 4: Remove consecutive commas: ,, or , , or ,\n,
+	for strings.Contains(s, ",,") {
+		s = strings.ReplaceAll(s, ",,", ",")
+	}
+	// Remove comma followed by whitespace then another comma
+	for strings.Contains(s, ", ,") {
+		s = strings.ReplaceAll(s, ", ,", ",")
+	}
+
+	// Step 5: Remove trailing commas before } or ]
+	for _, pair := range []struct{ old, new string }{
+		{",\n}", "\n}"},
+		{",\n]", "\n]"},
+		{", }", " }"},
+		{", ]", " ]"},
+		{",}", "}"},
+		{",]", "]"},
+	} {
+		s = strings.ReplaceAll(s, pair.old, pair.new)
+	}
+
+	// Step 6: Remove leading commas after { or [
+	s = strings.ReplaceAll(s, "{\n,", "{\n")
+	s = strings.ReplaceAll(s, "[\n,", "[\n")
+
+	return s
+}
+
+// isSimpleIdent checks if a string is a valid identifier (for unquoted JSON key detection)
+func isSimpleIdent(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_') {
+			return false
+		}
+	}
+	return true
 }
