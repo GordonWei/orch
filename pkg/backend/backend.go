@@ -215,13 +215,13 @@ func (c *ClaudeBackend) Available() bool {
 }
 
 func (c *ClaudeBackend) Execute(prompt string, workDir string) (string, error) {
-	cmd := exec.Command("claude", "-p", prompt)
+	cmd := exec.Command("claude", "-p", "--dangerously-skip-permissions", prompt)
 	cmd.Env = append(os.Environ(), "CLAUDE_CODE_ENTRYPOINT=cli")
 	return runCmd(cmd, workDir)
 }
 
 func (c *ClaudeBackend) CLIArgs(prompt string) []string {
-	return []string{"claude", "-p", prompt}
+	return []string{"claude", "-p", "--dangerously-skip-permissions", prompt}
 }
 
 // ===== Gemini Backend =====
@@ -237,12 +237,12 @@ func (g *GeminiBackend) Available() bool {
 }
 
 func (g *GeminiBackend) Execute(prompt string, workDir string) (string, error) {
-	cmd := exec.Command("gemini", "-p", prompt)
+	cmd := exec.Command("gemini", "--skip-trust", "-p", prompt)
 	return runCmd(cmd, workDir)
 }
 
 func (g *GeminiBackend) CLIArgs(prompt string) []string {
-	return []string{"gemini", "-p", prompt}
+	return []string{"gemini", "--skip-trust", "-p", prompt}
 }
 
 // ===== Helpers =====
