@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -31,6 +32,9 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br
 		return
 	}
 	defer rl.Close()
+
+	// Session context: keeps recent conversation turns for backend context injection
+	session := &sessionContext{maxTurns: 5}
 
 	fmt.Fprintf(rl.Stdout(), "🟢 orch %s — AI Chief of Staff\n", version)
 	fmt.Fprintf(rl.Stdout(), "   tools: %s\n", toolNames(reg))
@@ -62,11 +66,77 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br
 			continue
 		}
 
-		runTask(nil, reg, cfg, store, br, bus, input, false)
+		// Build context-enriched prompt for backend
+		// Planning/classification uses raw input; session context is prepended only for backend execution
+		sessionCtx := session.buildContext()
+		enrichedInput := input
+		if sessionCtx != "" {
+			enrichedInput = fmt.Sprintf("[Prior conversation for context]\n%s\n[End prior conversation]\n\nCurrent request: %s", sessionCtx, input)
+		}
+
+		// Capture output by redirecting stdout
+		oldStdout := os.Stdout
+		r, w, _ := os.Pipe()
+		os.Stdout = w
+
+		// Use enriched input so backend has conversation context
+		runTask(nil, reg, cfg, store, br, bus, enrichedInput, false)
+
+		w.Close()
+		os.Stdout = oldStdout
+		var outputBuf strings.Builder
+		io.Copy(&outputBuf, r)
+		r.Close()
+
+		output := outputBuf.String()
+		if output != "" {
+			fmt.Print(output)
+		}
+
+		// Store only the raw input/output in session (not the enriched version)
+		session.add(input, output)
 		fmt.Fprintln(os.Stderr)
 	}
 
 	fmt.Fprintln(os.Stderr, "👋 bye")
+}
+
+// sessionContext maintains a sliding window of recent conversation turns.
+type sessionContext struct {
+	turns    []sessionTurn
+	maxTurns int
+}
+
+type sessionTurn struct {
+	input  string
+	output string
+}
+
+func (s *sessionContext) add(input, output string) {
+	s.turns = append(s.turns, sessionTurn{
+		input:  truncateStr(input, 200),
+		output: truncateStr(output, 200),
+	})
+	if len(s.turns) > s.maxTurns {
+		s.turns = s.turns[len(s.turns)-s.maxTurns:]
+	}
+}
+
+// buildContext returns a compact context string for backend injection.
+// Only includes turns that have meaningful output.
+func (s *sessionContext) buildContext() string {
+	if len(s.turns) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, t := range s.turns {
+		if t.output == "" {
+			parts = append(parts, fmt.Sprintf("User: %s", t.input))
+		} else {
+			parts = append(parts, fmt.Sprintf("User: %s\nAssistant: %s", t.input, t.output))
+		}
+	}
+	return strings.Join(parts, "\n---\n")
 }
 
 // ===== REPL Slash Commands =====

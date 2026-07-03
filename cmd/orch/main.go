@@ -154,7 +154,10 @@ func main() {
 			fmt.Fprintf(os.Stderr, "🔗 reactive rules: %d loaded\n", len(rules))
 		}
 
-		runTask(ctx, reg, cfg, store, br, bus, prompt, args.dryRun)
+		ok := runTask(ctx, reg, cfg, store, br, bus, prompt, args.dryRun)
+		if !ok {
+			os.Exit(1)
+		}
 		return
 	}
 
@@ -357,7 +360,7 @@ Output only the briefing text, no titles or formatting.`, sb.String())
 
 // ===== Task Execution =====
 
-func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry, bus *eventbus.Bus, prompt string, dryRun bool) {
+func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry, bus *eventbus.Bus, prompt string, dryRun bool) bool {
 	// 1. Plan
 	fmt.Fprintf(os.Stderr, "🧠 planning...\n")
 	p := planner.New(reg, cfg, br)
@@ -365,7 +368,7 @@ func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, st
 	plan, err := p.GeneratePlan(prompt)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ planning failed: %v\n", err)
-		os.Exit(1)
+		return false
 	}
 
 	fmt.Fprintf(os.Stderr, "📝 %s\n", plan.TaskSummary)
@@ -375,7 +378,7 @@ func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, st
 	if dryRun {
 		fmt.Fprintf(os.Stderr, "\n")
 		printDryRun(plan)
-		return
+		return true
 	}
 
 	// Direct chat for simple conversations
@@ -396,7 +399,7 @@ func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, st
 					Tags:          []string{"chat"},
 				})
 			}
-			return
+			return true
 		}
 	}
 
@@ -491,7 +494,7 @@ func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, st
 	}
 
 	if !result.Success {
-		os.Exit(1)
+		return false
 	}
 
 	// 5. Event Bus — check trigger rules for reactive chaining
@@ -595,6 +598,7 @@ func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, st
 			}
 		}
 	}
+	return true
 }
 
 // findRule looks up a rule by name in the bus.
