@@ -141,6 +141,37 @@ func (s *Store) AddHistory(entry HistoryEntry) error {
 	return err
 }
 
+// AutoPrune deletes the oldest history entries if total count exceeds maxEntries.
+// If maxEntries <= 0, does nothing (unlimited).
+// This should be called periodically (e.g., after AddHistory) to keep the DB bounded.
+func (s *Store) AutoPrune(maxEntries int) (int64, error) {
+	if maxEntries <= 0 {
+		return 0, nil
+	}
+
+	// Count current entries
+	var count int
+	err := s.db.QueryRow("SELECT COUNT(*) FROM history").Scan(&count)
+	if err != nil {
+		return 0, err
+	}
+
+	if count <= maxEntries {
+		return 0, nil
+	}
+
+	// Delete oldest entries beyond the limit
+	excess := count - maxEntries
+	result, err := s.db.Exec(`
+		DELETE FROM history WHERE id IN (
+			SELECT id FROM history ORDER BY id ASC LIMIT ?
+		)`, excess)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 // RecentHistory returns the N most recent history entries.
 func (s *Store) RecentHistory(limit int) ([]HistoryEntry, error) {
 	rows, err := s.db.Query(`

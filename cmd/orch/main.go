@@ -154,7 +154,8 @@ func main() {
 			fmt.Fprintf(os.Stderr, "🔗 reactive rules: %d loaded\n", len(rules))
 		}
 
-		ok := runTask(ctx, reg, cfg, store, br, bus, prompt, args.dryRun)
+		// runTask prints the output itself; the returned string is only for REPL session context.
+		ok, _ := runTask(ctx, reg, cfg, store, br, bus, prompt, args.dryRun)
 		if !ok {
 			os.Exit(1)
 		}
@@ -360,7 +361,7 @@ Output only the briefing text, no titles or formatting.`, sb.String())
 
 // ===== Task Execution =====
 
-func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry, bus *eventbus.Bus, prompt string, dryRun bool) bool {
+func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry, bus *eventbus.Bus, prompt string, dryRun bool) (bool, string) {
 	// 1. Plan
 	fmt.Fprintf(os.Stderr, "🧠 planning...\n")
 	p := planner.New(reg, cfg, br)
@@ -368,7 +369,7 @@ func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, st
 	plan, err := p.GeneratePlan(prompt)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ planning failed: %v\n", err)
-		return false
+		return false, ""
 	}
 
 	fmt.Fprintf(os.Stderr, "📝 %s\n", plan.TaskSummary)
@@ -378,12 +379,12 @@ func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, st
 	if dryRun {
 		fmt.Fprintf(os.Stderr, "\n")
 		printDryRun(plan)
-		return true
+		return true, ""
 	}
 
 	// Direct chat for simple conversations
 	if plan.Category == "chat" || (len(plan.Steps) == 1 && plan.Steps[0].Agent == "local") {
-		answer, err := p.DirectChat(prompt)
+		answer, err := p.DirectChat(prompt) // prompt already contains session context if from REPL
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "   ⚠️  local chat failed: %v, falling back to executor\n", err)
 		} else {
@@ -399,7 +400,7 @@ func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, st
 					Tags:          []string{"chat"},
 				})
 			}
-			return true
+			return true, answer
 		}
 	}
 
@@ -450,6 +451,10 @@ func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, st
 	outputPrinterWg.Wait()
 
 	// 3. Report
+	// Print the step output here, BEFORE the event bus runs: chains may block on cloud
+	// backends for minutes, and the user should see the main result immediately.
+	// Callers must NOT print the returned output again — it exists only so the REPL
+	// can feed it into session context.
 	fmt.Fprintf(os.Stderr, "\n")
 	if result.Success {
 		fmt.Fprintf(os.Stderr, "🏁 complete (%s)\n", result.Took.Round(100*time.Millisecond))
@@ -491,10 +496,17 @@ func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, st
 			Tags:          []string{plan.Category, plan.Difficulty},
 			TookMs:        result.Took.Milliseconds(),
 		})
+
+		// Auto-prune if history_limit is configured
+		if cfg.Memory.HistoryLimit > 0 {
+			if pruned, err := store.AutoPrune(cfg.Memory.HistoryLimit); err == nil && pruned > 0 {
+				fmt.Fprintf(os.Stderr, "🗑️  auto-pruned %d old history entries\n", pruned)
+			}
+		}
 	}
 
 	if !result.Success {
-		return false
+		return false, ""
 	}
 
 	// 5. Event Bus — check trigger rules for reactive chaining
@@ -589,16 +601,47 @@ func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, st
 				chainOutput, err := b.Execute(chainPrompt, "")
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "   ❌ chain failed: %v\n", err)
+					fmt.Fprintf(os.Stderr, "   💡 to retry: orch \"%s\"\n", truncateStr(action.Prompt, 80))
+					// Record failed chain in history for visibility
+					if store != nil {
+						store.AddHistory(memory.HistoryEntry{
+							Input:         fmt.Sprintf("[chain:%s] %s", action.RuleName, truncateStr(action.Prompt, 200)),
+							Category:      "chain",
+							Agent:         action.Agent,
+							OutputSummary: fmt.Sprintf("FAILED: %v", err),
+							Success:       false,
+							Tags:          []string{"chain", action.RuleName, "failed"},
+						})
+					}
 				} else {
 					fmt.Fprintf(os.Stderr, "   ✅ chain complete\n")
 					if chainOutput != "" {
 						fmt.Print(chainOutput)
 					}
+					// Record successful chain in history
+					if store != nil {
+						store.AddHistory(memory.HistoryEntry{
+							Input:         fmt.Sprintf("[chain:%s] %s", action.RuleName, truncateStr(action.Prompt, 200)),
+							Category:      "chain",
+							Agent:         action.Agent,
+							OutputSummary: truncateStr(chainOutput, 500),
+							Success:       true,
+							Tags:          []string{"chain", action.RuleName},
+						})
+					}
 				}
 			}
 		}
 	}
-	return true
+
+	// Return the last step's output for REPL session context.
+	// It was already printed in the Report section above — callers must not print it again.
+	var finalOutput string
+	if len(result.Steps) > 0 {
+		last := result.Steps[len(result.Steps)-1]
+		finalOutput = last.Output
+	}
+	return true, finalOutput
 }
 
 // findRule looks up a rule by name in the bus.

@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -74,24 +73,10 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br
 			enrichedInput = fmt.Sprintf("[Prior conversation for context]\n%s\n[End prior conversation]\n\nCurrent request: %s", sessionCtx, input)
 		}
 
-		// Capture output by redirecting stdout
-		oldStdout := os.Stdout
-		r, w, _ := os.Pipe()
-		os.Stdout = w
-
-		// Use enriched input so backend has conversation context
-		runTask(nil, reg, cfg, store, br, bus, enrichedInput, false)
-
-		w.Close()
-		os.Stdout = oldStdout
-		var outputBuf strings.Builder
-		io.Copy(&outputBuf, r)
-		r.Close()
-
-		output := outputBuf.String()
-		if output != "" {
-			fmt.Print(output)
-		}
+		// runTask prints the output itself (immediately, before event-bus chains run).
+		// The returned value is used ONLY to feed session context — do not print it here,
+		// or every REPL reply appears twice.
+		_, output := runTask(nil, reg, cfg, store, br, bus, enrichedInput, false)
 
 		// Store only the raw input/output in session (not the enriched version)
 		session.add(input, output)

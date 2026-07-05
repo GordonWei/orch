@@ -22,26 +22,38 @@ The 3-layer routing architecture:
 ```
 User Input
     ▼
-┌─────────────────────────────────────┐
-│  Layer 1: Keyword Match (⚡ 0ms)     │  kubectl, terraform, helm → run directly
-└────────────┬────────────────────────┘
+┌──────────────────────────────────────────────┐
+│  Layer 1: Keyword + CLI Detection (⚡ 0ms)    │  70+ known CLIs → shell direct
+└────────────┬─────────────────────────────────┘
              ▼ no match
-┌─────────────────────────────────────┐
-│  Layer 2: MLX Local LLM (🍎 <1s)    │  classification routing + simple chat
-└────────────┬────────────────────────┘
+┌──────────────────────────────────────────────┐
+│  Layer 2: MLX Local LLM (🍎 <1s)             │  classification routing + chat
+└────────────┬─────────────────────────────────┘
              ▼ complex task / MLX fails
-┌─────────────────────────────────────┐
-│  Layer 3: Cloud AI Backend (☁️)      │  kiro / claude / gemini (any one)
-└─────────────────────────────────────┘
+┌──────────────────────────────────────────────┐
+│  Layer 3: Cloud AI Backend (☁️ 5min timeout)  │  kiro / claude / gemini
+└──────────────────────────────────────────────┘
              ▼
-┌─────────────────────────────────────┐
-│  DAG Executor (parallel goroutines)  │
-└─────────────────────────────────────┘
+┌──────────────────────────────────────────────┐
+│  DAG Executor (parallel goroutines)           │
+└──────────────────────────────────────────────┘
              ▼
-┌─────────────────────────────────────┐
-│  Memory Layer (SQLite)               │
-└─────────────────────────────────────┘
+┌──────────────────────────────────────────────┐
+│  Event Bus (reactive chaining)                │
+└──────────────────────────────────────────────┘
+             ▼
+┌──────────────────────────────────────────────┐
+│  Memory Layer (SQLite, auto-prune)            │
+└──────────────────────────────────────────────┘
 ```
+
+### Layer 1 Design: Zero-Latency CLI Detection
+
+Layer 1 uses three strategies to route commands instantly (no AI involved):
+
+1. **Configured keyword shortcuts** — Prefix matching from `config.yaml` (e.g., `kubectl`, `terraform plan`)
+2. **First-word CLI detection** — If the first token is a known CLI binary (70+ registered: `k`, `tf`, `docker`, `git`, `npm`, `brew`, etc.), route directly to shell
+3. **Chat detection with tech exclusion** — Greetings and social chat are caught here, but only if they don't contain technical keywords (prevents "幫我查 GKE pod 狀態" from being misrouted as chat)
 
 ### Layer 2 Design: Classification, Not Generation
 
@@ -278,6 +290,13 @@ orch briefing gen            # auto-generate briefing via MLX
 | `/b` | Show briefing |
 | `/help` | List all commands |
 
+### REPL Session Context
+
+The REPL maintains a **5-turn sliding window** of conversation history. This context is:
+- Injected into cloud backend prompts (so agents know what you discussed earlier)
+- Used by DirectChat for local model responses (no cross-turn amnesia)
+- Stripped before classification (so routing decisions aren't polluted by prior turns)
+
 ## How Backend Fallback Works
 
 If you only have **one** AI CLI installed (say, just `gemini`):
@@ -354,20 +373,21 @@ steps:
 
 ```
 cmd/orch/
-├── main.go          CLI entry + signal handler
-├── repl.go          REPL interactive mode
+├── main.go          CLI entry + signal handler + task execution
+├── repl.go          REPL interactive mode (session context, slash commands)
 ├── init.go          Interactive setup wizard
 ├── printer.go       Event output formatting
 └── dag.go           ASCII DAG rendering
 
 pkg/
-├── backend/         AI CLI backend interface + adapters (kiro/claude/gemini)
+├── backend/         AI CLI backend interface + adapters (kiro/claude/gemini) + timeout
 ├── config/          Config loader (YAML → struct)
-├── model/           Local LLM interface (OpenAI-compatible) + MLX auto-start
-├── memory/          SQLite memory layer (history + briefing)
+├── model/           Local LLM interface (OpenAI-compatible) + MLX auto-start with progress
+├── memory/          SQLite memory layer (history + briefing + auto-prune)
 ├── registry/        Local tool scanner (which CLIs are on this machine)
-├── planner/         3-layer routing: keyword → MLX classification → cloud planning
-├── executor/        DAG parallel execution engine (goroutines)
+├── planner/         3-layer routing: keyword/CLI detect → MLX classification → cloud
+├── executor/        DAG parallel execution engine (goroutines + streaming)
+├── eventbus/        Reactive workflow chaining (trigger rules + MLX gate + summarize)
 └── workflow/        YAML workflow template loader
 
 launchd/             macOS LaunchAgent for MLX daemon
@@ -422,6 +442,77 @@ npm install -g @anthropic-ai/claude-code
 # Option C: Gemini CLI
 npm install -g @anthropic-ai/gemini  # or: brew install gemini
 ```
+
+## Changelog
+
+### v0.8.0 (2026-07-06)
+
+**Routing accuracy & robustness overhaul.**
+
+- **Layer 1 expanded**: First-word CLI detection (70+ known binaries including `k`, `tf`, `docker`, `git`, `npm`, `make`, `brew`, `echo`, `cd`). Commands route in 0ms without hitting MLX.
+- **Chat detection tightened**: Added ~50 technical keyword exclusions. "幫我查 S3 bucket" no longer misroutes as chat. Chat patterns narrowed (removed overly broad "how to", "can you", "請問").
+- **Unified input classifier**: `classifyInputType()` is now the single classification function — the Layer 1 chat short-circuit (`tryKeywordPlan`) and the plan-fixup reroute check (`fixPlan`) both call it directly, with one shared keyword list. (An earlier pass left the old `looksLikeChat` helper in place alongside it with a different keyword list, so the two call sites could silently disagree on the same input — that helper has been removed.)
+- **REPL stability**: Removed `os.Pipe()` stdout capture hack. `runTask` remains the single place that prints task output — immediately after execution, *before* event-bus chains run (chains can block on cloud backends for minutes, so printing must not wait for them). The returned output value exists solely so the REPL can feed it into session context; callers must never print it. (This took three passes to get right: the first had both `runTask` and the REPL print, so every REPL reply appeared twice — caught via a pty-based test. The second moved printing to the callers, which deferred the main output until after all chains completed and inverted the main/chain output order. Final design: `runTask` prints, callers don't.) Verified with a pty-driven REPL session (reply appears exactly once) and a oneshot `echo` run (stdout contains exactly one copy, routed via Layer 1); see SOP "REPL replies appear twice" for the reusable check.
+- **Backend timeout**: All AI CLI calls (kiro/claude/gemini) now have a 5-minute timeout with automatic process kill. No more infinite hangs.
+- **MLX startup UX**: Progress indicator during MLX server startup (`⏳ waiting for mlx server... 5s`).
+- **Session context fix**: REPL session context now properly flows to DirectChat (local model no longer amnesiac across turns). Classification uses stripped input to avoid routing pollution.
+- **History auto-prune**: New `Store.AutoPrune()` keeps SQLite bounded (default limit: 1000 entries).
+- **Event Bus observability**: Chain failures are recorded in history with retry command hint. Successful chains also logged.
+- **Config alignment**: Default model in template changed to 3B (matches README and actual usage).
+- **Test coverage**: Added `TestClassifyInputType_*` covering command/chat/NL classification and a `TestClassifyInputType_SingleSourceOfTruth` test that fails if `tryKeywordPlan`'s chat routing and `classifyInputType` ever diverge again. This was the one part of the rewrite that shipped with zero tests initially.
+
+### v0.7.2 (2026-07-03)
+
+- REPL session context (5-turn sliding window)
+- REPL stability: failure no longer exits process
+
+### v0.7.1 (2026-07-03)
+
+- Bypass permission for all backends (claude `--dangerously-skip-permissions`, gemini `--skip-trust`)
+
+### v0.7.0 (2026-07-03)
+
+- MLX architecture rewrite: classification-only routing (no JSON generation)
+- Model upgrade: Qwen 2.5 1.5B → 3B
+- Chat detection (`looksLikeChat`) skips MLX planning
+- DirectChat repetition truncation
+- `--verbose` flag
+
+### v0.6.0 (2026-07-02)
+
+- Event Bus reactive workflow chaining (`pkg/eventbus/`)
+- MLX gate (YES/NO decision before cloud dispatch)
+- Output compression for downstream prompts
+
+### v0.5.0 (2026-07-02)
+
+- Backend abstraction (`pkg/backend/` — 3 adapters + Registry + auto-detect/fallback)
+- `orch init` interactive setup wizard
+- `--backend` flag override
+
+### v0.3.0 (2026-07-02)
+
+- `orch history` / `orch briefing` subcommands
+- `--dry-run` with ASCII DAG visualization
+- REPL slash commands (`/w`, `/h`, `/b`)
+- stdin pipe integration
+- MLX launchd daemon
+
+### v0.2.1 (2026-07-01)
+
+- DAG parallel execution (goroutines + DFS cycle detection)
+- YAML workflow templates
+- Streaming output (line-by-line for shell, progress for AI)
+
+### v0.2.0 (2026-07-01)
+
+- SQLite memory layer (history + briefing)
+- Configurable models
+- Re-plan loop (up to 2 retries)
+
+### v0.1.0 (2026-06-30)
+
+- Initial release: 3-layer routing + MLX + REPL + 15 unit tests
 
 ## License
 

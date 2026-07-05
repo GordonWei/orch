@@ -94,17 +94,31 @@ func New(reg *registry.Registry, cfg *config.Config, br *backend.Registry) *Plan
 }
 
 func (p *Planner) GeneratePlan(userInput string) (*Plan, error) {
+	// Extract the actual user request (strip REPL session context wrapper if present)
+	// Classification should only look at the current request, not prior conversation.
+	classifyInput := userInput
+	if idx := strings.Index(userInput, "Current request: "); idx != -1 {
+		classifyInput = strings.TrimSpace(userInput[idx+len("Current request: "):])
+	}
+
 	// Layer 1: Local keyword fast routing (simple tasks get plan directly)
-	if plan := p.tryKeywordPlan(userInput); plan != nil {
+	// tryKeywordPlan already builds Command/Prompt from classifyInput, so no further
+	// adjustment is needed here (unlike Layer 2 below, which re-injects session context).
+	if plan := p.tryKeywordPlan(classifyInput); plan != nil {
 		fmt.Fprintf(os.Stderr, "   ⚡ routed by: keyword match\n")
 		return plan, nil
 	}
 
 	// Layer 2: MLX local LLM (Apple Silicon local inference)
 	if p.mlxAvailable() {
-		plan, err := p.tryMLX(userInput)
+		// Use classifyInput for classification (no session context noise)
+		plan, err := p.tryMLX(classifyInput)
 		if err == nil && plan != nil {
 			fmt.Fprintf(os.Stderr, "   🍎 routed by: MLX local (Qwen 2.5 3B)\n")
+			// But use full userInput (with session context) for the actual prompt
+			if plan.Steps[0].Agent != "shell" {
+				plan.Steps[0].Prompt = userInput
+			}
 			return plan, nil
 		}
 		// MLX failed, fallback to cloud
@@ -131,8 +145,9 @@ func (p *Planner) GeneratePlan(userInput string) (*Plan, error) {
 func (p *Planner) tryKeywordPlan(input string) *Plan {
 	lower := strings.ToLower(input)
 
-	// Chat/greeting detection — route directly to local agent, skip MLX planning
-	if looksLikeChat(input) {
+	// Chat/greeting detection — route directly to local agent, skip MLX planning.
+	// Uses the same classifyInputType() as fixPlan()'s reroute logic (single source of truth).
+	if classifyInputType(input) == inputTypeChat {
 		return &Plan{
 			TaskSummary: input,
 			Difficulty:  "simple",
@@ -148,12 +163,64 @@ func (p *Planner) tryKeywordPlan(input string) *Plan {
 		}
 	}
 
+	// Check configured keyword shortcuts (prefix match)
 	for _, sc := range p.cfg.KeywordShortcuts {
 		if strings.HasPrefix(lower, strings.ToLower(sc.Prefix)) {
 			return &Plan{
 				TaskSummary: input,
 				Difficulty:  "simple",
 				Category:    sc.Category,
+				Steps: []Step{
+					{
+						ID:          "step_1",
+						Description: input,
+						Agent:       "shell",
+						Command:     input,
+					},
+				},
+			}
+		}
+	}
+
+	// First-word CLI detection: if the first token is a known CLI binary, route to shell directly.
+	// This catches aliases (k, tf) and CLIs not in keyword_shortcuts.
+	firstWord := strings.Fields(lower)
+	if len(firstWord) > 0 {
+		knownCLIs := map[string]string{
+			// Container & orchestration
+			"kubectl": "infra", "k": "infra", "helm": "deploy", "docker": "infra",
+			"docker-compose": "infra", "podman": "infra", "crictl": "infra",
+			// IaC & cloud
+			"terraform": "infra", "tf": "infra", "tofu": "infra",
+			"aws": "query", "gcloud": "query", "az": "query",
+			"sam": "deploy", "cdk": "deploy", "pulumi": "deploy",
+			// Git & dev
+			"git": "code", "gh": "code", "glab": "code",
+			"npm": "code", "pnpm": "code", "yarn": "code", "bun": "code",
+			"cargo": "code", "go": "code", "make": "code", "just": "code",
+			"pip": "code", "poetry": "code", "uv": "code",
+			// System
+			"ls": "query", "cat": "query", "grep": "query", "find": "query",
+			"ps": "query", "top": "query", "df": "query", "du": "query",
+			"tail": "query", "head": "query", "wc": "query",
+			"ping": "query", "curl": "query", "wget": "query",
+			"ssh": "infra", "scp": "infra", "rsync": "infra",
+			"chmod": "infra", "chown": "infra", "mkdir": "infra",
+			"rm": "infra", "cp": "infra", "mv": "infra",
+			"echo": "query", "cd": "query",
+			"hostname": "query", "whoami": "query", "uname": "query",
+			"sw_vers": "query", "date": "query", "which": "query",
+			"lsof": "query", "netstat": "query", "ifconfig": "query",
+			"ip": "query", "dig": "query", "nslookup": "query",
+			"brew": "infra", "apt": "infra", "yum": "infra",
+			// Monitoring
+			"htop": "query", "iostat": "query", "vmstat": "query",
+		}
+		if category, ok := knownCLIs[firstWord[0]]; ok {
+			return &Plan{
+				TaskSummary: input,
+				Difficulty:  "simple",
+				Category:    category,
 				Steps: []Step{
 					{
 						ID:          "step_1",
@@ -491,85 +558,153 @@ func (p *Planner) fixPlan(plan *Plan, userInput string) *Plan {
 	return plan
 }
 
-// looksLikeNaturalLanguage checks whether input is natural language (not a direct CLI command)
-// looksLikeChat detects simple chat/greeting inputs that don't need AI planning.
-func looksLikeChat(input string) bool {
-	lower := strings.ToLower(input)
+// looksLikeNaturalLanguage checks whether input is natural language (not a direct CLI command).
+func looksLikeNaturalLanguage(input string) bool {
+	return classifyInputType(input) == inputTypeNaturalLanguage
+}
 
-	// Chinese chat patterns
-	chatPatterns := []string{
-		"介紹", "你好", "嗨", "哈囉", "早安", "午安", "晚安",
-		"你是誰", "你是谁", "是什麼", "是什么",
-		"謝謝", "谢谢", "感謝",
-		"再見", "掰掰", "拜拜",
-		"幫我", "請問", "请问",
-		"什麼是", "什么是", "怎麼", "怎么",
-		"可以嗎", "可以吗", "好不好",
-	}
-	for _, p := range chatPatterns {
-		if strings.Contains(lower, p) {
-			return true
+// inputType represents the classification of user input.
+type inputType int
+
+const (
+	inputTypeCommand         inputType = iota // Direct CLI command (should run in shell)
+	inputTypeNaturalLanguage                  // Natural language task (needs AI planning)
+	inputTypeChat                             // Casual chat / greeting
+)
+
+// classifyInputType determines whether input is a CLI command, a natural language task, or chat.
+// This is the single source of truth for input classification: both tryKeywordPlan's Layer 1
+// chat short-circuit and fixPlan's shell/NL reroute check call this function. Do not add a
+// second classifier — extend the keyword lists below instead, or the two call sites can
+// silently disagree on the same input again.
+func classifyInputType(input string) inputType {
+	trimmed := strings.TrimSpace(input)
+	lower := strings.ToLower(trimmed)
+
+	// Step 1: Check if it's a direct CLI command (starts with known binary)
+	fields := strings.Fields(lower)
+	if len(fields) > 0 {
+		cliFirstWords := []string{
+			"kubectl", "k", "helm", "docker", "docker-compose", "podman",
+			"terraform", "tf", "tofu", "aws", "gcloud", "az",
+			"sam", "cdk", "pulumi",
+			"git", "gh", "glab", "npm", "pnpm", "yarn", "bun",
+			"cargo", "go", "make", "just", "pip", "poetry", "uv",
+			"ls", "cat", "grep", "find", "ps", "top", "df", "du",
+			"tail", "head", "wc", "ping", "curl", "wget",
+			"ssh", "scp", "rsync", "chmod", "chown", "mkdir",
+			"rm", "cp", "mv", "hostname", "whoami", "uname",
+			"sw_vers", "date", "which", "lsof", "netstat", "ifconfig",
+			"ip", "dig", "nslookup", "brew", "apt", "yum",
+			"echo", "cd",
 		}
-	}
-
-	// English chat patterns
-	engPatterns := []string{
-		"hello", "hi ", "hey ", "who are you", "introduce",
-		"thank", "bye", "good morning", "good night",
-		"what is", "what are", "how do", "how to",
-		"can you", "please",
-	}
-	for _, p := range engPatterns {
-		if strings.Contains(lower, p) {
-			return true
+		for _, cli := range cliFirstWords {
+			if fields[0] == cli {
+				return inputTypeCommand
+			}
 		}
-	}
-
-	// Very short input (< 20 chars) with Chinese → likely chat
-	if len([]rune(input)) <= 20 {
-		for _, r := range input {
-			if r >= 0x4e00 && r <= 0x9fff {
-				return true
+		// Starts with common CLI prefixes
+		cliPrefixes := []string{"./", "/", "sudo "}
+		for _, prefix := range cliPrefixes {
+			if strings.HasPrefix(lower, prefix) {
+				return inputTypeCommand
 			}
 		}
 	}
 
-	return false
-}
+	// Step 2: Technical keywords → it's a task, not chat or a schema copy-paste.
+	// Checked before the greeting patterns in Step 3 so any tech context wins.
+	techIndicators := []string{
+		// Infrastructure & cloud
+		"kubectl", "helm", "terraform", "aws", "gcloud", "docker", "k8s", "kubernetes",
+		"gke", "eks", "ecs", "s3", "ec2", "lambda", "cloudformation", "sam ",
+		"cloud run", "bigquery", "vpc", "subnet", "firewall", "load balancer",
+		"ingress", "gateway", "metallb", "rke2", "pod", "deploy", "namespace",
+		"node", "cluster", "service", "service mesh", "istio", "envoy",
+		// Code & dev tools
+		"git", "npm", "pnpm", "yarn", "make", "cargo", "pip", "go build", "go test",
+		"compile", "build", "test", "debug", "lint", "refactor",
+		"function", "class", "struct", "interface", "endpoint", "api",
+		// Files & system
+		"file", "directory", "folder", "path", "config", "yaml", "json", "log",
+		"error", "fix", "bug", "issue", "PR", "merge", "branch",
+		// Specific tools
+		"notion", "slack", "jira", "confluence",
+		"litellm", "backstage", "grafana", "prometheus",
+		// Action verbs that indicate work
+		"整理", "部署", "同步", "查詢", "分析", "修正", "更新", "刪除", "建立",
+		"設定", "檢查", "監控", "備份", "還原", "執行", "啟動", "停止",
+		"plan", "apply",
+	}
+	for _, kw := range techIndicators {
+		if strings.Contains(lower, kw) {
+			return inputTypeNaturalLanguage
+		}
+	}
 
-func looksLikeNaturalLanguage(input string) bool {
-	trimmed := strings.TrimSpace(input)
+	// Step 3: Explicit greeting/social patterns → chat, even for longer phrases that
+	// Step 6's length-based default wouldn't otherwise catch.
+	chatPatterns := []string{
+		"介紹", "你好", "嗨", "哈囉", "早安", "午安", "晚安",
+		"你是誰", "你是谁",
+		"謝謝", "谢谢", "感謝",
+		"再見", "掰掰", "拜拜",
+		"什麼是", "什么是",
+	}
+	for _, p := range chatPatterns {
+		if strings.Contains(lower, p) {
+			return inputTypeChat
+		}
+	}
+	engChatPatterns := []string{
+		"hello", "hi ", "hey ", "who are you", "introduce yourself",
+		"thank you", "thanks", "bye", "goodbye", "good morning", "good night",
+		"what is your name", "tell me about yourself",
+	}
+	for _, p := range engChatPatterns {
+		if strings.Contains(lower, p) {
+			return inputTypeChat
+		}
+	}
 
-	// Contains Chinese characters → natural language
+	// Step 4: Contains Chinese characters → check length as chat vs NL task
+	hasChinese := false
 	for _, r := range trimmed {
 		if r >= 0x4e00 && r <= 0x9fff {
-			return true
+			hasChinese = true
+			break
 		}
 	}
 
-	// Starts with common CLI tool → not natural language
-	cliPrefixes := []string{"kubectl", "helm", "terraform", "tf", "aws", "gcloud", "docker", "git", "ls", "cat", "echo", "hostname", "ping", "curl", "wget", "ssh", "scp", "cd", "mkdir", "rm", "cp", "mv", "grep", "find", "ps", "top", "df", "du", "ifconfig", "ip ", "sw_vers", "uname", "whoami", "date", "which", "brew"}
-	lower := strings.ToLower(trimmed)
-	for _, prefix := range cliPrefixes {
-		if strings.HasPrefix(lower, prefix) {
-			return false
+	if hasChinese {
+		// Short Chinese without tech/chat markers → likely chat.
+		// Tightened to <=10 (from 20) to avoid catching short tech queries like "查 S3" (6 chars).
+		if len([]rune(trimmed)) <= 10 {
+			return inputTypeChat
 		}
+		// Longer Chinese → natural language task
+		return inputTypeNaturalLanguage
 	}
 
-	// Contains multiple spaces (sentence) → natural language
+	// Step 5: English — sentence structure indicates NL
 	if strings.Count(trimmed, " ") >= 3 {
-		return true
+		return inputTypeNaturalLanguage
 	}
 
-	// Starts with verb in English (help, list, show, check, find, get...) → likely natural language
-	nlVerbs := []string{"help", "list", "show", "check", "find", "get ", "tell", "what", "how", "why", "can ", "please", "幫", "查", "列", "看", "找"}
+	// Step 6: Starts with NL verb
+	nlVerbs := []string{"help", "list", "show", "check", "find", "get ", "tell", "what", "how", "why", "can ", "summarize", "analyze", "create", "write", "generate"}
 	for _, v := range nlVerbs {
 		if strings.HasPrefix(lower, v) {
-			return true
+			return inputTypeNaturalLanguage
 		}
 	}
 
-	return false
+	// Default: if short and no indicators, probably chat
+	if len(trimmed) < 15 {
+		return inputTypeChat
+	}
+
+	return inputTypeNaturalLanguage
 }
 
 // looksInvalid checks whether command is obviously invalid

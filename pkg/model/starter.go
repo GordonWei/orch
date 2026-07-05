@@ -96,13 +96,18 @@ func (s *ServerStarter) waitForReady(pid int, timeout time.Duration) error {
 		Timeout:  5 * time.Second,
 	})
 
+	elapsed := 0
 	for time.Now().Before(deadline) {
 		time.Sleep(1 * time.Second)
+		elapsed++
 		if checker.Available() {
-			fmt.Fprintf(os.Stderr, "   ✅ %s server ready (pid %d)\n", s.backend, pid)
+			fmt.Fprintf(os.Stderr, "\r   ✅ %s server ready (pid %d, %ds)          \n", s.backend, pid, elapsed)
 			return nil
 		}
+		// Progress indicator every second
+		fmt.Fprintf(os.Stderr, "\r   ⏳ waiting for %s server... %ds", s.backend, elapsed)
 	}
 
+	fmt.Fprintf(os.Stderr, "\n")
 	return fmt.Errorf("%s server timeout after %s", s.backend, timeout)
 }

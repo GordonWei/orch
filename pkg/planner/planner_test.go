@@ -3,6 +3,8 @@ package planner
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/gordonwei/orch/pkg/config"
 )
 
 // test helper
@@ -166,6 +168,96 @@ func TestStepDependsOn_NullAndEmpty(t *testing.T) {
 	for _, step := range plan.Steps {
 		if len(step.DependsOn) != 0 {
 			t.Errorf("step %s: expected empty DependsOn, got %v", step.ID, step.DependsOn)
+		}
+	}
+}
+
+// TestClassifyInputType_Command verifies direct CLI invocations are routed as commands,
+// including the first-word aliases (k, tf) and the echo/cd entries added alongside the
+// Layer 1 knownCLIs map so the two lists stay consistent.
+func TestClassifyInputType_Command(t *testing.T) {
+	cases := []string{
+		"kubectl get pods",
+		"k get pods",
+		"terraform plan",
+		"tf apply",
+		"echo hello",
+		"cd /tmp",
+		"git status",
+		"./deploy.sh",
+		"sudo systemctl restart nginx",
+	}
+	for _, in := range cases {
+		if got := classifyInputType(in); got != inputTypeCommand {
+			t.Errorf("classifyInputType(%q) = %v, want inputTypeCommand", in, got)
+		}
+	}
+}
+
+// TestClassifyInputType_Chat verifies greetings/social chat is detected — both short
+// inputs caught by the length heuristic and longer explicit greeting phrases that the
+// length heuristic alone would miss.
+func TestClassifyInputType_Chat(t *testing.T) {
+	cases := []string{
+		"你好",
+		"嗨",
+		"謝謝",
+		"再見",
+		"hello",
+		"thank you",
+		"who are you, tell me about yourself", // long, but matches an explicit chat pattern
+	}
+	for _, in := range cases {
+		if got := classifyInputType(in); got != inputTypeChat {
+			t.Errorf("classifyInputType(%q) = %v, want inputTypeChat", in, got)
+		}
+	}
+}
+
+// TestClassifyInputType_NaturalLanguage verifies technical requests are never misrouted
+// as chat, even when short or containing a greeting-like word — this is the exact
+// regression the v0.8.0 "chat detection tightened" changelog entry was meant to fix.
+func TestClassifyInputType_NaturalLanguage(t *testing.T) {
+	cases := []string{
+		"幫我查 S3 bucket",
+		"查 GKE pod 狀態",
+		"請幫我執行 terraform plan for litellm-gke", // tech keyword mid-sentence, not the first word
+		"整理今天三場會議記錄到 Notion",
+		"幫我看一下 kubectl pod 狀態", // "kubectl" mid-sentence must still win over any chat pattern
+	}
+	for _, in := range cases {
+		if got := classifyInputType(in); got != inputTypeNaturalLanguage {
+			t.Errorf("classifyInputType(%q) = %v, want inputTypeNaturalLanguage", in, got)
+		}
+	}
+}
+
+// TestClassifyInputType_SingleSourceOfTruth guards against a second classifier being
+// reintroduced: tryKeywordPlan's chat short-circuit must agree with classifyInputType
+// directly, since a prior version had them diverge (looksLikeChat vs classifyInputType
+// carried different keyword lists).
+func TestClassifyInputType_SingleSourceOfTruth(t *testing.T) {
+	p := &Planner{cfg: &config.Config{}}
+	cases := map[string]inputType{
+		"你好":               inputTypeChat,
+		"幫我查 S3 bucket":    inputTypeNaturalLanguage,
+		"kubectl get pods": inputTypeCommand,
+	}
+	for in, want := range cases {
+		plan := p.tryKeywordPlan(in)
+		got := classifyInputType(in)
+		if got != want {
+			t.Fatalf("classifyInputType(%q) = %v, want %v (test setup issue)", in, got, want)
+		}
+		switch want {
+		case inputTypeChat:
+			if plan == nil || plan.Category != "chat" {
+				t.Errorf("tryKeywordPlan(%q): expected chat plan, got %+v", in, plan)
+			}
+		case inputTypeCommand:
+			if plan == nil || plan.Steps[0].Agent != "shell" {
+				t.Errorf("tryKeywordPlan(%q): expected shell plan, got %+v", in, plan)
+			}
 		}
 	}
 }

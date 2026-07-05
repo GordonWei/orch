@@ -29,19 +29,19 @@ ai_backend:
 # The model with `default: true` is used for local inference (Layer 2).
 # MLX is optional — orch works fine without it (skips to Layer 3).
 models:
-  - name: "qwen-1.5b"
+  - name: "qwen-3b"
     backend: "mlx"
     endpoint: "http://localhost:8080"
-    model: "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+    model: "mlx-community/Qwen2.5-3B-Instruct-4bit"
     python_path: "~/mlx-env/bin/python3"
     auto_start: true
     port: "8080"
     default: true
   # --- Other available models (uncomment to switch) ---
-  # - name: "qwen-3b"
+  # - name: "qwen-1.5b"
   #   backend: "mlx"
   #   endpoint: "http://localhost:8080"
-  #   model: "mlx-community/Qwen2.5-3B-Instruct-4bit"
+  #   model: "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
   #   python_path: "~/mlx-env/bin/python3"
   #   auto_start: true
   #   port: "8080"
@@ -59,7 +59,7 @@ memory:
   db_path: "~/.config/orch/orch.db"
   briefing_on_boot: true    # show last briefing summary on startup
   auto_summarize: true      # auto-compress task summary into briefing after completion
-  history_limit: 0          # max history entries (0=unlimited)
+  history_limit: 1000     # max history entries before auto-pruning (0=unlimited)
 
 # === Workflow Templates ===
 # YAML workflows in this directory are loaded and matched by trigger keyword.

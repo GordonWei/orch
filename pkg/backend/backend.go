@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // Backend defines the interface for an AI CLI backend.
@@ -247,6 +248,9 @@ func (g *GeminiBackend) CLIArgs(prompt string) []string {
 
 // ===== Helpers =====
 
+// defaultTimeout is the maximum duration for a single backend CLI execution.
+const defaultTimeout = 5 * time.Minute
+
 func runCmd(cmd *exec.Cmd, workDir string) (string, error) {
 	if workDir != "" {
 		cmd.Dir = workDir
@@ -256,10 +260,31 @@ func runCmd(cmd *exec.Cmd, workDir string) (string, error) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	if err := cmd.Run(); err != nil {
-		return stdout.String(), fmt.Errorf("%s failed: %w\nstderr: %s",
-			cmd.Path, err, stderr.String())
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("%s failed to start: %w", cmd.Path, err)
 	}
 
-	return stdout.String(), nil
+	// Wait with timeout
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+
+	timer := time.NewTimer(defaultTimeout)
+	defer timer.Stop()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			return stdout.String(), fmt.Errorf("%s failed: %w\nstderr: %s",
+				cmd.Path, err, stderr.String())
+		}
+		return stdout.String(), nil
+	case <-timer.C:
+		// Timeout: kill the process
+		if cmd.Process != nil {
+			cmd.Process.Kill()
+		}
+		return stdout.String(), fmt.Errorf("%s timed out after %s", cmd.Path, defaultTimeout)
+	}
 }

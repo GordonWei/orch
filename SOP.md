@@ -7,9 +7,11 @@
 | Input Type | Route | Example |
 |-----------|-------|---------|
 | Workflow trigger | 📋 YAML workflow | `orch "signoff"` |
-| CLI command | ⚡ shell direct | `orch "kubectl get pods"` |
-| General Q&A | 🍎 local LLM | `orch "what is K8s?"` |
-| Task dispatch | 🍎→agent | `orch "check AWS billing"` |
+| Known CLI (70+) | ⚡ shell direct (0ms) | `orch "docker ps"`, `orch "git status"` |
+| Configured prefix | ⚡ shell direct (0ms) | `orch "kubectl get pods"` |
+| General Q&A / chat | 🍎 local LLM | `orch "hello"` |
+| NL task dispatch | 🍎→agent classification | `orch "check AWS billing"` |
+| Complex multi-step | ☁️ cloud planning | `orch "整理今天會議記錄到 Notion"` |
 
 ### Managing Memory
 
@@ -23,6 +25,45 @@ orch briefing set "focus: ..."  # set manually
 orch briefing gen               # auto-generate via MLX
 ```
 
+**Auto-pruning**: History is automatically pruned when exceeding `history_limit` (default: 1000 entries). Oldest entries are removed first.
+
+### REPL Mode
+
+```bash
+orch                            # enter REPL
+```
+
+Features:
+- **Session context**: 5-turn sliding window, backends see prior conversation
+- **Slash commands**: `/w` workflows, `/h` history, `/b` briefing, `/help`
+- **No stdout capture hack**: `runTask` no longer redirects `os.Stdout` through an `os.Pipe()`.
+  `runTask` is the single place that prints task output — right after execution and *before*
+  event-bus chains run, so the result is never delayed behind a slow cloud chain. The output
+  is also returned as a value, but only so the REPL can store it in session context —
+  callers must not print it (doing so is exactly the double-output bug this replaced).
+
+### Reactive Event Bus
+
+When a step completes, trigger rules in `~/.config/orch/workflows/*.yaml` can automatically dispatch follow-up actions:
+
+```yaml
+name: "auto-sync-notion"
+on: "step.done"
+agent: "claude"
+condition: "category==meeting"
+then:
+  agent: claude
+  prompt: "Sync the following to Notion:\n{{.Output}}"
+  gate_with_mlx: true    # MLX decides if dispatch is worthwhile
+  summarize: true         # compress large output before passing
+  max_context: 5000       # truncate at N chars
+```
+
+**Chain failure handling** (v0.8+):
+- Failed chains are recorded in history with tag `chain/failed`
+- A retry command is printed: `💡 to retry: orch "..."`
+- Successful chains are also logged for traceability
+
 ## Configuration
 
 Config file: `~/.config/orch/config.yaml`
@@ -33,7 +74,7 @@ Move `default: true` to the desired model, then restart MLX server:
 
 ```bash
 pkill -f "mlx_lm.server"
-orch "hello"   # auto-starts with new model
+orch "hello"   # auto-starts with new model (shows progress: ⏳ waiting... Ns)
 ```
 
 ### Using Ollama
@@ -57,8 +98,12 @@ Requires: `brew install ollama && ollama pull llama3.1:8b`
 memory:
   briefing_on_boot: false    # disable boot briefing
   auto_summarize: false      # disable auto-summarize
-  history_limit: 5000        # auto-prune above limit (0=unlimited)
+  history_limit: 1000        # auto-prune above limit (0=unlimited, default: 1000)
 ```
+
+### Backend Timeout
+
+All AI CLI backend calls (kiro/claude/gemini) have a **5-minute timeout**. If a backend process hangs (waiting for input, rate-limited), it is automatically killed after 5 minutes with error output preserved.
 
 ## Workflow Templates
 
@@ -89,7 +134,7 @@ ls ~/mlx-env/bin/python3
 
 # start manually to see errors
 ~/mlx-env/bin/python3 -m mlx_lm.server \
-  --model mlx-community/Qwen2.5-1.5B-Instruct-4bit --port 8080
+  --model mlx-community/Qwen2.5-3B-Instruct-4bit --port 8080
 
 # port conflict
 lsof -i :8080 && kill $(lsof -ti :8080)
@@ -102,6 +147,48 @@ curl http://localhost:8080/v1/models   # should return 200
 ```
 
 If it fails: verify `auto_start: true` and `~/mlx-env/bin/python3` exists.
+
+### Backend hangs / timeout
+
+If you see `timed out after 5m0s`:
+- Check if the backend CLI requires interactive input (kiro/claude may prompt for auth)
+- Run the backend directly to verify: `claude -p "hello"`
+- Check rate limits on the API
+
+### Task misrouted as chat
+
+If a technical request gets answered by the local 3B model instead of cloud:
+- Use `--verbose` to see MLX classification output
+- Add relevant tech keywords to `keyword_shortcuts` in config
+- Override with `--backend kiro "your task"` for one-off
+
+### REPL replies appear twice
+
+Output printing lives in exactly one place: `runTask` (cmd/orch/main.go) prints task/chat
+output right after execution. Callers (`main()` oneshot, the REPL loop) receive the output
+as a return value for session context only and must NOT print it. If replies start appearing
+twice, someone reintroduced a `fmt.Print(output)` at a call site.
+
+To verify, you need a real terminal (piping stdin into `orch` triggers pipe mode and
+bypasses the REPL entirely — this is why the bug escaped plain-pipe testing):
+
+```bash
+# oneshot: stdout must contain exactly one copy
+orch "echo dup-check" | grep -c "dup-check"   # → 1
+
+# REPL: drive through a pty (python3 one-liner)
+python3 -c "
+import pty,os,time,select,sys
+pid,fd=pty.fork()
+if pid==0: os.execvp('orch',['orch'])
+time.sleep(1); os.read(fd,4096)
+os.write(fd,'你好\n'.encode()); time.sleep(12)
+buf=b''
+while select.select([fd],[],[],2)[0]: buf+=os.read(fd,4096)
+os.write(fd,b'exit\n')
+sys.stdout.write(str(buf.decode(errors='replace').count('可以幫你')))
+"   # → 1
+```
 
 ### LaunchAgent (daemon) management
 
@@ -123,6 +210,9 @@ tail -f ~/Library/Logs/orch-mlx.log
 
 ```bash
 sqlite3 ~/.config/orch/orch.db "SELECT timestamp, input, category FROM history ORDER BY id DESC LIMIT 10;"
+
+# Check chain failures
+sqlite3 ~/.config/orch/orch.db "SELECT timestamp, input, output_summary FROM history WHERE tags LIKE '%failed%' ORDER BY id DESC LIMIT 5;"
 ```
 
 ## Migration (New Machine)

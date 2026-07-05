@@ -180,7 +180,7 @@ Response rules:
 			DBPath:         filepath.Join(home, ".config", "orch", "orch.db"),
 			BriefingOnBoot: true,
 			AutoSummarize:  true,
-			HistoryLimit:   0, // unlimited
+			HistoryLimit:   1000, // auto-prune oldest entries beyond this limit
 		},
 		Workflows: WorkflowConfig{
 			Dir: filepath.Join(home, ".config", "orch", "workflows"),
