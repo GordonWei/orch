@@ -627,7 +627,7 @@ func classifyInputType(input string) inputType {
 		"function", "class", "struct", "interface", "endpoint", "api",
 		// Files & system
 		"file", "directory", "folder", "path", "config", "yaml", "json", "log",
-		"error", "fix", "bug", "issue", "PR", "merge", "branch",
+		"error", "fix", "bug", "issue", "merge", "branch",
 		// Specific tools
 		"notion", "slack", "jira", "confluence",
 		"litellm", "backstage", "grafana", "prometheus",
@@ -657,7 +657,7 @@ func classifyInputType(input string) inputType {
 		}
 	}
 	engChatPatterns := []string{
-		"hello", "hi ", "hey ", "who are you", "introduce yourself",
+		"hello", "hey ", "who are you", "introduce yourself",
 		"thank you", "thanks", "bye", "goodbye", "good morning", "good night",
 		"what is your name", "tell me about yourself",
 	}
@@ -665,6 +665,10 @@ func classifyInputType(input string) inputType {
 		if strings.Contains(lower, p) {
 			return inputTypeChat
 		}
+	}
+	// "hi" needs prefix match to avoid false positives like "sushi", "this"
+	if strings.HasPrefix(lower, "hi ") || lower == "hi" {
+		return inputTypeChat
 	}
 
 	// Step 4: Contains Chinese characters → check length as chat vs NL task

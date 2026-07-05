@@ -399,6 +399,9 @@ func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, st
 					Success:       true,
 					Tags:          []string{"chat"},
 				})
+				if cfg.Memory.HistoryLimit > 0 {
+					store.AutoPrune(cfg.Memory.HistoryLimit)
+				}
 			}
 			return true, answer
 		}
