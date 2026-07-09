@@ -1,5 +1,7 @@
 # Binary
 /orch
+/session_demo
+spike/session_proxy/proxy
 *.exe
 
 # OS

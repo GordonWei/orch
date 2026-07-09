@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/chzyer/readline"
 	"github.com/gordonwei/orch/pkg/backend"
@@ -13,6 +14,7 @@ import (
 	"github.com/gordonwei/orch/pkg/executor"
 	"github.com/gordonwei/orch/pkg/memory"
 	"github.com/gordonwei/orch/pkg/registry"
+	"github.com/gordonwei/orch/pkg/session"
 	"github.com/gordonwei/orch/pkg/workflow"
 )
 
@@ -33,15 +35,32 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br
 	defer rl.Close()
 
 	// Session context: keeps recent conversation turns for backend context injection
-	session := &sessionContext{maxTurns: 5}
+	replSession := &sessionContext{maxTurns: 5}
+
+	// Session manager for interactive PTY sessions
+	sm := NewSessionManager()
+	defer sm.KillAll()
 
 	fmt.Fprintf(rl.Stdout(), "🟢 orch %s — AI Chief of Staff\n", version)
 	fmt.Fprintf(rl.Stdout(), "   tools: %s\n", toolNames(reg))
 	fmt.Fprintf(rl.Stdout(), "   type your request, /help for commands, ctrl+d to quit\n\n")
 
 	for {
+		// Update prompt based on session mode
+		if sm.HasActive() {
+			rl.SetPrompt(fmt.Sprintf("%s› ", sm.ActiveBackend()))
+		} else {
+			rl.SetPrompt("› ")
+		}
+
 		line, err := rl.Readline()
 		if err == readline.ErrInterrupt {
+			// Ctrl+C in session mode → back to normal
+			if sm.HasActive() {
+				sm.Back()
+				fmt.Fprintf(os.Stderr, "⏎ back to normal mode\n")
+				continue
+			}
 			continue
 		}
 		if err != nil {
@@ -59,27 +78,51 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br
 			continue
 		}
 
-		// Slash command
+		// Slash commands are handled in both modes
 		if strings.HasPrefix(input, "/") {
-			handleSlashCommand(rl, reg, cfg, store, br, input)
+			handleSlashCommand(rl, reg, cfg, store, br, bus, sm, input)
 			continue
 		}
 
-		// Build context-enriched prompt for backend
-		// Planning/classification uses raw input; session context is prepended only for backend execution
-		sessionCtx := session.buildContext()
+		// === Session mode: forward input to active session ===
+		if sm.HasActive() {
+			sess := sm.Active()
+			if sess == nil {
+				fmt.Fprintf(os.Stderr, "⚠️  session died unexpectedly, back to normal mode\n")
+				sm.Back()
+				continue
+			}
+
+			if err := sess.Send(input); err != nil {
+				fmt.Fprintf(os.Stderr, "❌ send failed: %v\n", err)
+				continue
+			}
+
+			// Read response (blocks until idle)
+			output, err := sess.Read()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "❌ read failed: %v\n", err)
+				continue
+			}
+
+			if output != "" {
+				fmt.Print(output)
+				if !strings.HasSuffix(output, "\n") {
+					fmt.Println()
+				}
+			}
+			continue
+		}
+
+		// === Normal mode: existing planner behavior ===
+		sessionCtx := replSession.buildContext()
 		enrichedInput := input
 		if sessionCtx != "" {
 			enrichedInput = fmt.Sprintf("[Prior conversation for context]\n%s\n[End prior conversation]\n\nCurrent request: %s", sessionCtx, input)
 		}
 
-		// runTask prints the output itself (immediately, before event-bus chains run).
-		// The returned value is used ONLY to feed session context — do not print it here,
-		// or every REPL reply appears twice.
 		_, output := runTask(nil, reg, cfg, store, br, bus, enrichedInput, false)
-
-		// Store only the raw input/output in session (not the enriched version)
-		session.add(input, output)
+		replSession.add(input, output)
 		fmt.Fprintln(os.Stderr)
 	}
 
@@ -107,8 +150,6 @@ func (s *sessionContext) add(input, output string) {
 	}
 }
 
-// buildContext returns a compact context string for backend injection.
-// Only includes turns that have meaningful output.
 func (s *sessionContext) buildContext() string {
 	if len(s.turns) == 0 {
 		return ""
@@ -126,14 +167,29 @@ func (s *sessionContext) buildContext() string {
 
 // ===== REPL Slash Commands =====
 
-func handleSlashCommand(rl *readline.Instance, reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry, input string) {
+func handleSlashCommand(rl *readline.Instance, reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry, bus *eventbus.Bus, sm *SessionManager, input string) {
 	parts := strings.Fields(input)
 	cmd := strings.ToLower(parts[0])
 	args := parts[1:]
 
 	switch cmd {
 	case "/help":
-		printREPLHelp()
+		printREPLHelp(sm)
+
+	case "/session":
+		handleSessionCmd(sm, args)
+
+	case "/switch":
+		handleSwitchCmd(sm, args)
+
+	case "/sessions":
+		handleSessionsCmd(sm)
+
+	case "/back":
+		handleBackCmd(sm)
+
+	case "/kill":
+		handleKillCmd(sm, args)
 
 	case "/w", "/workflows":
 		if len(args) > 0 {
@@ -153,19 +209,188 @@ func handleSlashCommand(rl *readline.Instance, reg *registry.Registry, cfg *conf
 	}
 }
 
-func printREPLHelp() {
+// --- Session commands ---
+
+func handleSessionCmd(sm *SessionManager, args []string) {
+	if len(args) == 0 {
+		fmt.Fprintf(os.Stderr, "Usage: /session <claude|kiro>\n")
+		return
+	}
+
+	backend := parseBackend(args[0])
+	if backend == "" {
+		fmt.Fprintf(os.Stderr, "❌ unsupported backend: %s (use: claude, kiro)\n", args[0])
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "🔌 connecting to %s...\n", backend)
+	if err := sm.SpawnOrSwitch(backend); err != nil {
+		fmt.Fprintf(os.Stderr, "❌ %v\n", err)
+		return
+	}
+
+	// Wait a moment for the session to initialize
+	time.Sleep(2 * time.Second)
+
+	// Drain initial output (startup banner)
+	sess := sm.Active()
+	if sess != nil {
+		banner := sess.ReadRaw()
+		if banner != "" {
+			fmt.Print(banner)
+			if !strings.HasSuffix(banner, "\n") {
+				fmt.Println()
+			}
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "✅ session active: %s (type /back to return to orch)\n", backend)
+}
+
+func handleSwitchCmd(sm *SessionManager, args []string) {
+	if len(args) == 0 {
+		// If no arg, list available and prompt
+		infos := sm.List()
+		if len(infos) == 0 {
+			fmt.Fprintf(os.Stderr, "❌ no sessions running. Use /session <claude|kiro> to start one\n")
+			return
+		}
+		fmt.Fprintf(os.Stderr, "Usage: /switch <claude|kiro>\nRunning sessions:\n")
+		for _, info := range infos {
+			marker := "  "
+			if info.IsActive {
+				marker = "→ "
+			}
+			fmt.Fprintf(os.Stderr, "  %s%s (up %s)\n", marker, info.Backend, time.Since(info.StartedAt).Round(time.Second))
+		}
+		return
+	}
+
+	backend := parseBackend(args[0])
+	if backend == "" {
+		fmt.Fprintf(os.Stderr, "❌ unsupported backend: %s\n", args[0])
+		return
+	}
+
+	if err := sm.Switch(backend); err != nil {
+		fmt.Fprintf(os.Stderr, "❌ %v\n", err)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "✅ switched to %s\n", backend)
+}
+
+func handleSessionsCmd(sm *SessionManager) {
+	infos := sm.List()
+	if len(infos) == 0 {
+		fmt.Fprintf(os.Stderr, "📋 no sessions running\n")
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "📋 Sessions:\n")
+	for _, info := range infos {
+		marker := "  "
+		if info.IsActive {
+			marker = "→ "
+		}
+		idle := ""
+		if info.IsIdle {
+			idle = " (idle)"
+		}
+		uptime := time.Since(info.StartedAt).Round(time.Second)
+		fmt.Fprintf(os.Stderr, "  %s%s — up %s%s\n", marker, info.Backend, uptime, idle)
+	}
+}
+
+func handleBackCmd(sm *SessionManager) {
+	if !sm.HasActive() {
+		fmt.Fprintf(os.Stderr, "ℹ️  already in normal mode\n")
+		return
+	}
+	backend := sm.ActiveBackend()
+	sm.Back()
+	fmt.Fprintf(os.Stderr, "⏎ back to normal mode (session %s still alive in background)\n", backend)
+}
+
+func handleKillCmd(sm *SessionManager, args []string) {
+	if len(args) == 0 {
+		// Kill active session if any
+		if !sm.HasActive() {
+			fmt.Fprintf(os.Stderr, "Usage: /kill <claude|kiro|all>\n")
+			return
+		}
+		backend := sm.ActiveBackend()
+		if err := sm.Kill(backend); err != nil {
+			fmt.Fprintf(os.Stderr, "❌ %v\n", err)
+			return
+		}
+		fmt.Fprintf(os.Stderr, "💀 killed %s session\n", backend)
+		return
+	}
+
+	target := strings.ToLower(args[0])
+	if target == "all" {
+		sm.KillAll()
+		fmt.Fprintf(os.Stderr, "💀 killed all sessions\n")
+		return
+	}
+
+	backend := parseBackend(target)
+	if backend == "" {
+		fmt.Fprintf(os.Stderr, "❌ unsupported backend: %s\n", target)
+		return
+	}
+
+	if err := sm.Kill(backend); err != nil {
+		fmt.Fprintf(os.Stderr, "❌ %v\n", err)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "💀 killed %s session\n", backend)
+}
+
+// parseBackend converts a user string to a session.Backend constant.
+func parseBackend(s string) session.Backend {
+	switch strings.ToLower(s) {
+	case "claude", "c":
+		return session.BackendClaude
+	case "kiro", "k":
+		return session.BackendKiro
+	default:
+		return ""
+	}
+}
+
+// --- Help ---
+
+func printREPLHelp(sm *SessionManager) {
 	fmt.Fprintf(os.Stderr, `
 📖 REPL Commands:
-  /w, /workflows     — list all available workflows
-  /w <number>        — execute workflow by number
-  /h, /history       — last 10 history entries
-  /b, /briefing      — show current briefing
-  /help              — show this help
-  tools              — list registered tools
-  exit, quit, q      — exit
+
+  Session Mode:
+    /session <claude|kiro>  — start or attach to a backend session
+    /switch <claude|kiro>   — switch between running sessions
+    /sessions               — list all running sessions
+    /back                   — return to normal mode (session stays alive)
+    /kill [backend|all]     — terminate a session
+    Ctrl+C                  — same as /back
+
+  Normal Mode:
+    /w, /workflows          — list all available workflows
+    /w <number>             — execute workflow by number
+    /h, /history            — last 10 history entries
+    /b, /briefing           — show current briefing
+    tools                   — list registered tools
+    exit, quit, q           — exit (kills all sessions)
 
 `)
+	if sm.HasActive() {
+		fmt.Fprintf(os.Stderr, "  Current mode: SESSION (%s)\n", sm.ActiveBackend())
+		fmt.Fprintf(os.Stderr, "  All non-slash input is forwarded to %s\n\n", sm.ActiveBackend())
+	} else {
+		fmt.Fprintf(os.Stderr, "  Current mode: NORMAL (input goes to orch planner)\n\n")
+	}
 }
+
+// ===== Workflow / History / Briefing (unchanged) =====
 
 func handleWorkflowMenu(rl *readline.Instance, reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry) {
 	workflows, err := workflow.LoadAll(cfg.Workflows.Dir)

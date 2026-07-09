@@ -284,11 +284,51 @@ orch briefing gen            # auto-generate briefing via MLX
 
 | Command | Description |
 |---------|-------------|
+| `/session <claude\|kiro>` | Start or attach to a backend session (enters session mode) |
+| `/switch <claude\|kiro>` | Switch between running sessions |
+| `/sessions` | List all running sessions (uptime, idle status) |
+| `/back` | Return to normal mode (session stays alive in background) |
+| `/kill [backend\|all]` | Terminate a session |
+| Ctrl+C | Same as `/back` when in session mode |
 | `/w` | List available workflows |
 | `/w 1` | Execute workflow #1 |
 | `/h` | Last 10 history entries |
 | `/b` | Show briefing |
 | `/help` | List all commands |
+
+### Session Mode
+
+Session mode provides **persistent interactive sessions** with AI CLI backends. Instead of one-shot calls through the planner, your input is directly forwarded to the backend's live PTY session.
+
+```bash
+› /session claude        # spawn a claude session
+🔌 connecting to claude...
+✅ session active: claude (type /back to return to orch)
+
+claude› help me refactor this function    # forwarded directly to claude
+[claude's response appears here]
+
+claude› /back            # return to orch normal mode
+⏎ back to normal mode (session claude still alive in background)
+
+› /session kiro          # start a kiro session too
+kiro› deploy the terraform changes
+[kiro's response]
+
+kiro› /switch claude     # switch back to claude (still alive)
+✅ switched to claude
+
+claude› /sessions        # see all running sessions
+📋 Sessions:
+  → claude — up 5m32s
+    kiro — up 2m18s (idle)
+
+claude› /kill all        # terminate everything
+💀 killed all sessions
+›                        # back to normal mode
+```
+
+Shorthand: `c` = claude, `k` = kiro.
 
 ### REPL Session Context
 
@@ -373,11 +413,12 @@ steps:
 
 ```
 cmd/orch/
-├── main.go          CLI entry + signal handler + task execution
-├── repl.go          REPL interactive mode (session context, slash commands)
-├── init.go          Interactive setup wizard
-├── printer.go       Event output formatting
-└── dag.go           ASCII DAG rendering
+├── main.go              CLI entry + signal handler + task execution
+├── repl.go              REPL interactive mode (session mode, slash commands)
+├── session_manager.go   Multi-session lifecycle manager (spawn/switch/kill/list)
+├── init.go              Interactive setup wizard
+├── printer.go           Event output formatting
+└── dag.go               ASCII DAG rendering
 
 pkg/
 ├── backend/         AI CLI backend interface + adapters (kiro/claude/gemini) + timeout
@@ -388,6 +429,7 @@ pkg/
 ├── planner/         3-layer routing: keyword/CLI detect → MLX classification → cloud
 ├── executor/        DAG parallel execution engine (goroutines + streaming)
 ├── eventbus/        Reactive workflow chaining (trigger rules + MLX gate + summarize)
+├── session/         PTY-based interactive session (spawn/send/read/kill + idle detection)
 └── workflow/        YAML workflow template loader
 
 launchd/             macOS LaunchAgent for MLX daemon
@@ -444,6 +486,22 @@ npm install -g @anthropic-ai/gemini  # or: brew install gemini
 ```
 
 ## Changelog
+
+### v0.9.0 (2026-07-08)
+
+**Interactive Session Mode — persistent PTY sessions with AI backends.**
+
+The biggest UX shift since v0.1: instead of one-shot planner calls, you can now **attach to a live backend session** and have a multi-turn conversation directly through orch.
+
+- **Session mode**: `/session claude` or `/session kiro` spawns a persistent PTY session. All subsequent input is forwarded directly — no planning, no routing, no overhead.
+- **Multi-session support**: Run claude and kiro sessions simultaneously. `/switch` between them; `/sessions` to see what's alive; `/kill` to terminate.
+- **Prompt indicator**: When in session mode, the prompt shows the active backend (`claude›` or `kiro›`). Normal mode shows `›`.
+- **Graceful lifecycle**: Sessions survive `/back` (return to normal mode). They run in background until explicitly `/kill`ed or orch exits. `Ctrl+C` in session mode = `/back`.
+- **Shorthand**: `c` = claude, `k` = kiro (e.g., `/session c`).
+- **New package `pkg/session/`**: PTY-based session management (macOS native `/dev/ptmx`, no third-party deps). Includes idle detection, ANSI stripping, and graceful kill (sends `/exit` or `/quit`, waits 3s, then SIGKILL).
+- **New file `session_manager.go`**: Manages multiple sessions with single-active-pointer pattern.
+
+This solves the original pain point: "I still have to switch between kiro and claude terminals manually." Now orch is the single interface for everything — quick local tasks (normal mode) and deep interactive work (session mode).
 
 ### v0.8.0 (2026-07-06)
 
