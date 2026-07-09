@@ -93,6 +93,11 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br
 				continue
 			}
 
+			// Route hint: suggest switching if input matches cross-domain keywords
+			if suggested, kw := RouteHint(input, sm.ActiveBackend()); suggested != "" {
+				fmt.Fprintf(os.Stderr, "💡 \"%s\" → might be better in %s (/switch %s)\n", kw, suggested, suggested)
+			}
+
 			if err := sess.Send(input); err != nil {
 				fmt.Fprintf(os.Stderr, "❌ send failed: %v\n", err)
 				continue
