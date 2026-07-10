@@ -42,6 +42,52 @@ Features:
   is also returned as a value, but only so the REPL can store it in session context —
   callers must not print it (doing so is exactly the double-output bug this replaced).
 
+### Session Mode (v0.9+)
+
+Persistent interactive PTY sessions with AI backends. Instead of one-shot planner calls, attach to a live session and have multi-turn conversations directly through orch.
+
+```bash
+› /session claude         # spawn (or attach if already running)
+claude› help me refactor  # forwarded directly to claude
+claude› /back             # return to normal mode (session alive in background)
+› /session kiro           # start a kiro session
+kiro› /switch claude      # switch back to claude
+claude› /kill all         # terminate everything
+›                         # back to normal
+```
+
+Shorthand: `c` = claude, `k` = kiro (e.g., `/session c`)
+
+**Route Hints (v0.10+)**: When in a session, orch detects if your input matches another backend's domain and suggests switching:
+
+```
+claude› terraform plan for litellm-gke
+💡 "terraform" → might be better in kiro (/switch kiro)
+```
+
+- 73 keyword/phrase rules, 3-tier confidence (strong/medium/weak)
+- Only medium+ signals trigger suggestions
+- Cooldown: 3 inputs between hints (no nagging)
+- Same-domain keywords are ignored (e.g., "notion" in claude won't trigger)
+
+**Session Health (v0.10+)**:
+- `WatchSessions()` monitors session health in background (2s interval)
+- If a session dies unexpectedly: `⚠️ session X died unexpectedly`
+- Auto-restart available: sessions can be configured to respawn on crash
+- `/sessions` shows uptime, idle status, and restart count
+
+**Graceful Shutdown (v0.10+)**:
+- `Ctrl+C` or `SIGTERM` triggers 3-phase shutdown: send `/exit` → wait 5s → force kill
+- No orphan processes left behind
+- All PTY file descriptors properly closed
+
+### ANSI Strip (v0.10+)
+
+Session output is automatically cleaned:
+- All ANSI escape sequences (SGR colors, cursor movement, erase) stripped
+- **Alternate screen buffer awareness**: TUI apps entering alt screen (`ESC[?1049h`) have their chrome completely discarded. Only real output after leaving alt screen is shown.
+- Stateful across chunked reads (handles sequences split across multiple PTY reads)
+
 ### Reactive Event Bus
 
 When a step completes, trigger rules in `~/.config/orch/workflows/*.yaml` can automatically dispatch follow-up actions:
@@ -154,6 +200,50 @@ If you see `timed out after 5m0s`:
 - Check if the backend CLI requires interactive input (kiro/claude may prompt for auth)
 - Run the backend directly to verify: `claude -p "hello"`
 - Check rate limits on the API
+
+### Session won't start
+
+If `/session claude` or `/session kiro` fails:
+
+```bash
+# Verify the CLI is available
+which claude && claude --version
+which kiro-cli && kiro-cli --version
+
+# Test direct PTY spawn (bypass orch)
+python3 -c "import pty; pty.spawn(['claude', '--dangerously-skip-permissions'])"
+```
+
+Common issues:
+- CLI not installed or not in PATH
+- Auth expired (claude needs `claude auth`, kiro needs login)
+- Another instance already running with lock file
+
+### Session output is garbled / shows escape codes
+
+If you see raw ANSI codes in session output:
+- This shouldn't happen in v0.10+ (StripState handles alt screen)
+- If it does: the TUI app may be using non-standard escape sequences
+- Check with `--verbose`: `orch --verbose` then `/session claude`
+- File a bug with the raw output
+
+### Route hints not appearing
+
+Route hints only trigger when:
+1. You're in session mode (not normal mode)
+2. The keyword matches a DIFFERENT backend's domain
+3. The match strength is ≥ 2 (medium or strong)
+4. Cooldown elapsed (at least 3 inputs since last hint)
+
+To debug: weak signals (strength 1) like "test" or "會議" are intentionally suppressed.
+
+### Session died unexpectedly
+
+When you see `⚠️ session X died unexpectedly`:
+- The backend process crashed or was killed externally
+- Use `/session X` to restart
+- If it keeps dying, run the backend directly to check for errors
+- Consider enabling auto-restart: (currently code-level, future: config flag)
 
 ### Task misrouted as chat
 
