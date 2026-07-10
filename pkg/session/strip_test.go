@@ -73,12 +73,71 @@ func TestStripANSI_DCS(t *testing.T) {
 
 func TestStripANSI_PrivateCSI(t *testing.T) {
 	// DEC private mode: ESC[?25l (hide cursor), ESC[?25h (show cursor)
-	// ESC[?1049h (alt screen buffer), ESC[?1049l (restore)
-	input := "\x1b[?25lfoo\x1b[?25h\x1b[?1049hbar\x1b[?1049l"
+	// These non-alt-screen private modes should just be stripped (content kept)
+	input := "\x1b[?25lfoo\x1b[?25hbar"
 	want := "foobar"
 	got := stripANSI(input)
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestStripANSI_AltScreen1049(t *testing.T) {
+	// ESC[?1049h enters alt screen, content discarded, ESC[?1049l leaves
+	input := "before\x1b[?1049hTUI chrome\x1b[?1049lafter"
+	want := "beforeafter"
+	got := stripANSI(input)
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestStripANSI_AltScreen47(t *testing.T) {
+	// ESC[?47h / ESC[?47l variant
+	input := "hello\x1b[?47hdiscarded\x1b[?47l world"
+	want := "hello world"
+	got := stripANSI(input)
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestStripANSI_AltScreen1047(t *testing.T) {
+	// ESC[?1047h / ESC[?1047l variant
+	input := "A\x1b[?1047hXXX\x1b[?1047lB"
+	want := "AB"
+	got := stripANSI(input)
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestStripState_ChunkedAltScreen(t *testing.T) {
+	// Alt screen enter and leave split across multiple reads
+	st := &StripState{}
+
+	// Chunk 1: enter alt screen midway
+	r1 := st.Strip("before\x1b[?1049hTUI stuff")
+	if r1 != "before" {
+		t.Errorf("chunk1: got %q, want %q", r1, "before")
+	}
+	if !st.InAltScreen {
+		t.Error("expected InAltScreen=true after chunk1")
+	}
+
+	// Chunk 2: still in alt screen, all discarded
+	r2 := st.Strip("more TUI chrome\x1b[1;32mcolored")
+	if r2 != "" {
+		t.Errorf("chunk2: got %q, want %q", r2, "")
+	}
+
+	// Chunk 3: leave alt screen, content after is kept
+	r3 := st.Strip("\x1b[?1049lafter exit")
+	if r3 != "after exit" {
+		t.Errorf("chunk3: got %q, want %q", r3, "after exit")
+	}
+	if st.InAltScreen {
+		t.Error("expected InAltScreen=false after chunk3")
 	}
 }
 

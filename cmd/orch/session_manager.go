@@ -8,22 +8,240 @@ import (
 	"github.com/gordonwei/orch/pkg/session"
 )
 
+// SessionEvent represents a lifecycle event for a managed session.
+type SessionEvent struct {
+	Type    string // "died", "restarted", "killed"
+	Backend session.Backend
+	Err     error
+}
+
 // SessionManager manages multiple interactive PTY sessions.
 // At most one session per backend; one is "active" at any time (or none).
 type SessionManager struct {
-	mu       sync.Mutex
-	sessions map[session.Backend]*managedSession
-	active   session.Backend // "" means no active session (normal mode)
+	mu          sync.Mutex
+	sessions    map[session.Backend]*managedSession
+	active      session.Backend // "" means no active session (normal mode)
+	autoRestart map[session.Backend]bool
+	events      chan SessionEvent
+	stopWatch   chan struct{}
 }
 
 type managedSession struct {
-	sess      *session.Session
-	startedAt time.Time
+	sess         *session.Session
+	startedAt    time.Time
+	restartCount int
+	lastOutput   time.Time
 }
 
 func NewSessionManager() *SessionManager {
 	return &SessionManager{
-		sessions: make(map[session.Backend]*managedSession),
+		sessions:    make(map[session.Backend]*managedSession),
+		autoRestart: make(map[session.Backend]bool),
+		events:      make(chan SessionEvent, 16),
+		stopWatch:   make(chan struct{}),
+	}
+}
+
+// Events returns the read-only channel for session lifecycle events.
+func (m *SessionManager) Events() <-chan SessionEvent {
+	return m.events
+}
+
+// SetAutoRestart enables or disables auto-restart for a backend.
+// When enabled, if the session dies it will automatically respawn.
+func (m *SessionManager) SetAutoRestart(backend session.Backend, enabled bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.autoRestart[backend] = enabled
+}
+
+// WatchSessions starts a background goroutine that periodically checks
+// session health and emits events when sessions die.
+// It also handles auto-restart logic. Call this once after creating the manager.
+func (m *SessionManager) WatchSessions() {
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-m.stopWatch:
+				return
+			case <-ticker.C:
+				m.checkSessions()
+			}
+		}
+	}()
+}
+
+// checkSessions inspects all managed sessions and handles dead ones.
+func (m *SessionManager) checkSessions() {
+	m.mu.Lock()
+
+	var deadBackends []session.Backend
+	for backend, ms := range m.sessions {
+		if !ms.sess.Alive() {
+			deadBackends = append(deadBackends, backend)
+		}
+	}
+
+	if len(deadBackends) == 0 {
+		m.mu.Unlock()
+		return
+	}
+
+	// Process dead sessions
+	for _, backend := range deadBackends {
+		ms := m.sessions[backend]
+		restartCount := ms.restartCount
+
+		// Clear active pointer if this was the active session
+		if m.active == backend {
+			m.active = ""
+		}
+
+		shouldRestart := m.autoRestart[backend]
+		delete(m.sessions, backend)
+
+		m.mu.Unlock()
+
+		// Emit "died" event
+		m.emitEvent(SessionEvent{
+			Type:    "died",
+			Backend: backend,
+			Err:     fmt.Errorf("process exited unexpectedly"),
+		})
+
+		// Auto-restart if enabled
+		if shouldRestart {
+			cfg := session.DefaultConfig(backend)
+			sess, err := session.Spawn(cfg)
+			if err != nil {
+				m.emitEvent(SessionEvent{
+					Type:    "died",
+					Backend: backend,
+					Err:     fmt.Errorf("auto-restart failed: %w", err),
+				})
+			} else {
+				m.mu.Lock()
+				m.sessions[backend] = &managedSession{
+					sess:         sess,
+					startedAt:    time.Now(),
+					restartCount: restartCount + 1,
+					lastOutput:   time.Now(),
+				}
+				m.mu.Unlock()
+
+				m.emitEvent(SessionEvent{
+					Type:    "restarted",
+					Backend: backend,
+				})
+			}
+		}
+
+		m.mu.Lock()
+	}
+
+	m.mu.Unlock()
+}
+
+// emitEvent sends a non-blocking event to the events channel.
+func (m *SessionManager) emitEvent(event SessionEvent) {
+	select {
+	case m.events <- event:
+	default:
+		// Channel full, drop event (non-blocking to avoid deadlock)
+	}
+}
+
+// Shutdown gracefully terminates all sessions:
+// 1. Sends graceful exit commands to all sessions
+// 2. Waits up to 5 seconds for all to exit
+// 3. Force kills any remaining
+// 4. Returns only when all PTY fds are closed
+func (m *SessionManager) Shutdown() {
+	// Stop the watcher first
+	select {
+	case m.stopWatch <- struct{}{}:
+	default:
+	}
+
+	m.mu.Lock()
+	if len(m.sessions) == 0 {
+		m.mu.Unlock()
+		return
+	}
+
+	// Collect all sessions
+	type sessionEntry struct {
+		backend session.Backend
+		ms      *managedSession
+	}
+	var entries []sessionEntry
+	for backend, ms := range m.sessions {
+		entries = append(entries, sessionEntry{backend: backend, ms: ms})
+	}
+	m.sessions = make(map[session.Backend]*managedSession)
+	m.active = ""
+	m.mu.Unlock()
+
+	// Phase 1: Send graceful exit commands to all
+	for _, e := range entries {
+		exitCmd := "/exit\r"
+		if e.backend == session.BackendKiro {
+			exitCmd = "/quit\r"
+		}
+		e.ms.sess.Send(exitCmd)
+	}
+
+	// Phase 2: Wait up to 5 seconds for all to exit gracefully
+	deadline := time.After(5 * time.Second)
+	remaining := make([]*managedSession, 0, len(entries))
+
+	for _, e := range entries {
+		remaining = append(remaining, e.ms)
+	}
+
+	for len(remaining) > 0 {
+		select {
+		case <-deadline:
+			// Timeout — force kill all remaining
+			goto forceKill
+		default:
+			var stillAlive []*managedSession
+			for _, ms := range remaining {
+				if ms.sess.Alive() {
+					stillAlive = append(stillAlive, ms)
+				}
+			}
+			remaining = stillAlive
+			if len(remaining) > 0 {
+				time.Sleep(200 * time.Millisecond)
+			}
+		}
+	}
+	return
+
+forceKill:
+	// Phase 3: Force kill any that didn't exit gracefully
+	var wg sync.WaitGroup
+	for _, ms := range remaining {
+		if ms.sess.Alive() {
+			wg.Add(1)
+			go func(s *managedSession) {
+				defer wg.Done()
+				s.sess.Kill()
+			}(ms)
+		}
+	}
+	wg.Wait()
+
+	// Emit killed events
+	for _, e := range entries {
+		m.emitEvent(SessionEvent{
+			Type:    "killed",
+			Backend: e.backend,
+		})
 	}
 }
 
@@ -44,8 +262,9 @@ func (m *SessionManager) Spawn(backend session.Backend) error {
 	}
 
 	m.sessions[backend] = &managedSession{
-		sess:      sess,
-		startedAt: time.Now(),
+		sess:       sess,
+		startedAt:  time.Now(),
+		lastOutput: time.Now(),
 	}
 	m.active = backend
 	return nil
@@ -88,11 +307,24 @@ func (m *SessionManager) Kill(backend session.Backend) error {
 	delete(m.sessions, backend)
 	m.mu.Unlock()
 
-	return ms.sess.Kill()
+	err := ms.sess.Kill()
+
+	m.emitEvent(SessionEvent{
+		Type:    "killed",
+		Backend: backend,
+	})
+
+	return err
 }
 
 // KillAll terminates all sessions.
 func (m *SessionManager) KillAll() {
+	// Stop the watcher
+	select {
+	case m.stopWatch <- struct{}{}:
+	default:
+	}
+
 	m.mu.Lock()
 	toKill := make([]*session.Session, 0, len(m.sessions))
 	for _, ms := range m.sessions {
@@ -157,10 +389,12 @@ func (m *SessionManager) List() []SessionInfo {
 			continue
 		}
 		infos = append(infos, SessionInfo{
-			Backend:   backend,
-			StartedAt: ms.startedAt,
-			IsActive:  backend == m.active,
-			IsIdle:    ms.sess.IsIdle(),
+			Backend:      backend,
+			StartedAt:    ms.startedAt,
+			IsActive:     backend == m.active,
+			IsIdle:       ms.sess.IsIdle(),
+			RestartCount: ms.restartCount,
+			LastOutput:   ms.lastOutput,
 		})
 	}
 	return infos
@@ -168,10 +402,12 @@ func (m *SessionManager) List() []SessionInfo {
 
 // SessionInfo holds display information about a session.
 type SessionInfo struct {
-	Backend   session.Backend
-	StartedAt time.Time
-	IsActive  bool
-	IsIdle    bool
+	Backend      session.Backend
+	StartedAt    time.Time
+	IsActive     bool
+	IsIdle       bool
+	RestartCount int
+	LastOutput   time.Time
 }
 
 // Get returns the session for a specific backend (nil if not exists/dead).
@@ -184,6 +420,17 @@ func (m *SessionManager) Get(backend session.Backend) *session.Session {
 		return nil
 	}
 	return ms.sess
+}
+
+// TouchOutput updates the LastOutput timestamp for a backend.
+// Called by the REPL when output is received from a session.
+func (m *SessionManager) TouchOutput(backend session.Backend) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if ms, ok := m.sessions[backend]; ok {
+		ms.lastOutput = time.Now()
+	}
 }
 
 // SpawnOrSwitch spawns a new session if none exists, otherwise switches to it.
@@ -206,8 +453,9 @@ func (m *SessionManager) SpawnOrSwitch(backend session.Backend) error {
 
 	m.mu.Lock()
 	m.sessions[backend] = &managedSession{
-		sess:      sess,
-		startedAt: time.Now(),
+		sess:       sess,
+		startedAt:  time.Now(),
+		lastOutput: time.Now(),
 	}
 	m.active = backend
 	m.mu.Unlock()

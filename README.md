@@ -415,7 +415,8 @@ steps:
 cmd/orch/
 ├── main.go              CLI entry + signal handler + task execution
 ├── repl.go              REPL interactive mode (session mode, slash commands)
-├── session_manager.go   Multi-session lifecycle manager (spawn/switch/kill/list)
+├── session_manager.go   Multi-session lifecycle manager (spawn/switch/kill/watch/auto-restart/shutdown)
+├── route_hint.go        Intelligent cross-domain route suggestions (73 rules, 3-tier confidence)
 ├── init.go              Interactive setup wizard
 ├── printer.go           Event output formatting
 └── dag.go               ASCII DAG rendering
@@ -429,7 +430,7 @@ pkg/
 ├── planner/         3-layer routing: keyword/CLI detect → MLX classification → cloud
 ├── executor/        DAG parallel execution engine (goroutines + streaming)
 ├── eventbus/        Reactive workflow chaining (trigger rules + MLX gate + summarize)
-├── session/         PTY-based interactive session (spawn/send/read/kill + idle detection)
+├── session/         PTY-based interactive session (spawn/send/read/kill + idle detection + ANSI strip with alt screen awareness)
 └── workflow/        YAML workflow template loader
 
 launchd/             macOS LaunchAgent for MLX daemon
@@ -486,6 +487,18 @@ npm install -g @anthropic-ai/gemini  # or: brew install gemini
 ```
 
 ## Changelog
+
+### v0.10.0 (2026-07-10)
+
+**Session mode hardening — ANSI strip, intelligent route hints, crash resilience.**
+
+Completes the "second round" of session mode improvements. The session experience is now production-quality with proper TUI handling, smart routing, and fault tolerance.
+
+- **ANSI strip: alternate screen buffer awareness** — New `StripState` struct tracks alternate screen buffer mode across chunked reads. When a TUI app enters alt screen (`ESC[?1049h`, `ESC[?47h`, `ESC[?1047h`), all content is discarded until the leave sequence arrives. This eliminates TUI chrome (menus, progress bars, status lines) from session output while preserving the meaningful text. `stripANSI` moved to its own file (`pkg/session/strip.go`) for clarity.
+- **Route hints v2: 73 rules, 3-tier confidence, cooldown** — Complete rewrite of `route_hint.go`. Rules expanded from 25 → 73, covering multi-word phrases (matched first to avoid false positives), single keywords, and both Chinese and English patterns. Three confidence levels (strong/medium/weak) — only medium+ triggers suggestions. Built-in cooldown (3 inputs between hints) prevents nagging. Contextual reason messages explain WHY the switch is suggested.
+- **Session crash detection & auto-restart** — `WatchSessions()` background goroutine polls session health every 2 seconds. Dead sessions emit `SessionEvent` notifications to the REPL. Optional `SetAutoRestart(backend, true)` automatically respawns crashed sessions. `SessionInfo` now includes `RestartCount` and `LastOutput` timestamp.
+- **Graceful shutdown** — New `Shutdown()` method: sends exit commands → waits 5s → force kills remaining. Signal handler (`SIGINT`/`SIGTERM`) now calls `Shutdown()` ensuring all PTY file descriptors are properly closed on exit. No more orphan processes.
+- **Test coverage** — 17 new tests for session manager (lifecycle, cooldown, route hints, stateful strip). Total: 38 tests across session + cmd packages.
 
 ### v0.9.0 (2026-07-08)
 

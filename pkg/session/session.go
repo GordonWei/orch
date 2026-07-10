@@ -216,11 +216,12 @@ func (s *Session) readLoop() {
 		close(s.done)
 	}()
 
+	stripper := &StripState{}
 	buf := make([]byte, 4096)
 	for {
 		n, err := s.ptmx.Read(buf)
 		if n > 0 {
-			cleaned := stripANSI(string(buf[:n]))
+			cleaned := stripper.Strip(string(buf[:n]))
 			if strings.TrimSpace(cleaned) != "" {
 				s.mu.Lock()
 				s.output.WriteString(cleaned)
@@ -308,109 +309,4 @@ func setWinSize(f *os.File, cols, rows uint16) {
 	syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), syscall.TIOCSWINSZ, uintptr(unsafe.Pointer(&ws)))
 }
 
-// stripANSI removes ANSI escape sequences and control characters.
-// Handles: CSI sequences (cursor, erase, scroll, SGR), OSC sequences,
-// DCS/PM/APC strings, single-byte C1 controls, and two-char ESC sequences.
-func stripANSI(s string) string {
-	var result strings.Builder
-	result.Grow(len(s) / 2) // pre-alloc roughly half (most input is control codes from TUI)
-	i := 0
-	for i < len(s) {
-		if s[i] == 0x1B {
-			i++
-			if i >= len(s) {
-				break
-			}
-			switch s[i] {
-			case '[': // CSI — covers cursor movement, erase, scroll, SGR, etc.
-				i++
-				// Skip parameter bytes (0x30–0x3F: digits, semicolons, ?, >, etc.)
-				for i < len(s) && s[i] >= 0x30 && s[i] <= 0x3F {
-					i++
-				}
-				// Skip intermediate bytes (0x20–0x2F: space, !, ", #, etc.)
-				for i < len(s) && s[i] >= 0x20 && s[i] <= 0x2F {
-					i++
-				}
-				// Final byte (0x40–0x7E) — the command letter
-				if i < len(s) && s[i] >= 0x40 && s[i] <= 0x7E {
-					i++
-				}
-			case ']': // OSC — Operating System Command (title, hyperlinks, etc.)
-				i++
-				for i < len(s) {
-					if s[i] == 0x07 { // BEL terminates
-						i++
-						break
-					}
-					if s[i] == 0x1B && i+1 < len(s) && s[i+1] == '\\' { // ST terminates
-						i += 2
-						break
-					}
-					i++
-				}
-			case 'P', 'X', '^', '_': // DCS, SOS, PM, APC — string sequences terminated by ST
-				i++
-				for i < len(s) {
-					if s[i] == 0x1B && i+1 < len(s) && s[i+1] == '\\' {
-						i += 2
-						break
-					}
-					if s[i] == 0x9C { // single-byte ST (C1)
-						i++
-						break
-					}
-					i++
-				}
-			case '(', ')', '*', '+': // Character set designation (G0–G3)
-				i++
-				if i < len(s) {
-					i++ // skip the charset designator byte
-				}
-			case '#': // DEC line attributes (e.g. ESC#8 = DECALN)
-				i++
-				if i < len(s) {
-					i++
-				}
-			default:
-				// Two-char ESC sequences: save/restore cursor (7/8), RIS (c),
-				// DECPNM (>), DECPAM (=), NEL (E), RI (M), HTS (H), etc.
-				i++
-			}
-		} else if s[i] == 0x9B {
-			// Single-byte CSI (C1 control, 0x9B) — same as ESC[
-			i++
-			for i < len(s) && s[i] >= 0x30 && s[i] <= 0x3F {
-				i++
-			}
-			for i < len(s) && s[i] >= 0x20 && s[i] <= 0x2F {
-				i++
-			}
-			if i < len(s) && s[i] >= 0x40 && s[i] <= 0x7E {
-				i++
-			}
-		} else if s[i] == 0x90 || s[i] == 0x98 || s[i] == 0x9E || s[i] == 0x9F {
-			// Single-byte DCS/SOS/PM/APC (C1 range)
-			i++
-			for i < len(s) && s[i] != 0x9C {
-				i++
-			}
-			if i < len(s) {
-				i++ // skip ST
-			}
-		} else if s[i] == '\r' {
-			// Strip carriage return (PTY artifact)
-			i++
-		} else if s[i] < 0x20 && s[i] != '\n' && s[i] != '\t' {
-			// Strip all other C0 control characters (BEL, BS, VT, FF, etc.)
-			i++
-		} else if s[i] == 0x7F {
-			// DEL character
-			i++
-		} else {
-			result.WriteByte(s[i])
-			i++
-		}
-	}
-	return result.String()
-}
+

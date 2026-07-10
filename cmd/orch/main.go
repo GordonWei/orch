@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -23,6 +24,19 @@ import (
 // version is set at build time via -ldflags "-X main.version=v0.4"
 var version = "dev"
 var verbose bool
+
+// shutdownFunc is a hook for the signal handler to call Shutdown() on the session manager.
+var (
+	shutdownMu   sync.Mutex
+	shutdownFunc func()
+)
+
+// RegisterShutdown sets the function to call on SIGINT/SIGTERM.
+func RegisterShutdown(fn func()) {
+	shutdownMu.Lock()
+	defer shutdownMu.Unlock()
+	shutdownFunc = fn
+}
 
 func main() {
 	args := parseArgs()
@@ -59,8 +73,13 @@ func main() {
 		sig := <-sigCh
 		fmt.Fprintf(os.Stderr, "\n⚡ received %v, shutting down...\n", sig)
 		cancel()
-		// Allow goroutines time to clean up
-		time.Sleep(500 * time.Millisecond)
+		// Run registered shutdown hooks (e.g. session manager)
+		shutdownMu.Lock()
+		fn := shutdownFunc
+		shutdownMu.Unlock()
+		if fn != nil {
+			fn()
+		}
 		os.Exit(130)
 	}()
 

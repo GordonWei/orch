@@ -39,7 +39,30 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br
 
 	// Session manager for interactive PTY sessions
 	sm := NewSessionManager()
-	defer sm.KillAll()
+	sm.WatchSessions()
+	defer sm.Shutdown()
+
+	// Register shutdown hook so signal handler can gracefully close sessions
+	RegisterShutdown(sm.Shutdown)
+
+	// Listen for session death events in background
+	go func() {
+		for event := range sm.Events() {
+			switch event.Type {
+			case "died":
+				fmt.Fprintf(os.Stderr, "\n⚠️  session %s died unexpectedly", event.Backend)
+				if event.Err != nil {
+					fmt.Fprintf(os.Stderr, ": %v", event.Err)
+				}
+				fmt.Fprintf(os.Stderr, "\n")
+				fmt.Fprintf(os.Stderr, "   💡 use /session %s to restart, or /kill %s to clean up\n", event.Backend, event.Backend)
+			case "restarted":
+				fmt.Fprintf(os.Stderr, "\n🔄 session %s auto-restarted\n", event.Backend)
+			case "killed":
+				// Silent — user initiated
+			}
+		}
+	}()
 
 	fmt.Fprintf(rl.Stdout(), "🟢 orch %s — AI Chief of Staff\n", version)
 	fmt.Fprintf(rl.Stdout(), "   tools: %s\n", toolNames(reg))
@@ -115,6 +138,7 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br
 				if !strings.HasSuffix(output, "\n") {
 					fmt.Println()
 				}
+				sm.TouchOutput(sm.ActiveBackend())
 			}
 			continue
 		}
