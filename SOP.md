@@ -75,18 +75,21 @@ claude› terraform plan for litellm-gke
 - If a session dies unexpectedly: `⚠️ session X died unexpectedly`
 - Auto-restart available: sessions can be configured to respawn on crash
 - `/sessions` shows uptime, idle status, and restart count
+- v0.10.1: auto-restart is now race-safe against a concurrent `/session <backend>` or `/kill all` happening mid-restart — no more silently overwritten or orphaned processes
 
 **Graceful Shutdown (v0.10+)**:
 - `Ctrl+C` or `SIGTERM` triggers 3-phase shutdown: send `/exit` → wait 5s → force kill
 - No orphan processes left behind
 - All PTY file descriptors properly closed
+- v0.10.1: a second `Ctrl+C` while shutdown is in progress now forces an immediate exit instead of waiting out the full (up to ~8s) sequence; one-shot/subcommand mode (outside session mode) also has its grace period restored
 
 ### ANSI Strip (v0.10+)
 
 Session output is automatically cleaned:
 - All ANSI escape sequences (SGR colors, cursor movement, erase) stripped
 - **Alternate screen buffer awareness**: TUI apps entering alt screen (`ESC[?1049h`) have their chrome completely discarded. Only real output after leaving alt screen is shown.
-- Stateful across chunked reads (handles sequences split across multiple PTY reads)
+- Stateful across chunked reads (handles sequences split across multiple PTY reads, including a sequence split mid-way through the chunk boundary — fixed in v0.10.1, was previously silently dropped)
+- **UTF-8 safe (v0.10.1+)**: high bytes are decoded as UTF-8 before being checked against the C1 control-code table, so multi-byte characters (Traditional Chinese, etc.) are never misidentified as escape sequences. Before v0.10.1, ordinary CJK session output could get silently truncated.
 
 ### Reactive Event Bus
 
@@ -222,10 +225,17 @@ Common issues:
 ### Session output is garbled / shows escape codes
 
 If you see raw ANSI codes in session output:
-- This shouldn't happen in v0.10+ (StripState handles alt screen)
+- This shouldn't happen in v0.10.1+ (StripState handles alt screen, buffers sequences split across chunk boundaries, and is UTF-8 safe)
 - If it does: the TUI app may be using non-standard escape sequences
 - Check with `--verbose`: `orch --verbose` then `/session claude`
 - File a bug with the raw output
+
+### Session goes silent / stops responding mid-conversation
+
+If a session (especially claude/kiro rendering a spinner or full-screen UI) stops producing any output and `orch` never prints a reply:
+- Fixed in v0.10.1 — idle detection previously only reset while the backend was already inside alt-screen chrome-suppression, so a long-running render could trip the idle timeout early and drop the eventual answer
+- If you're on an older build: `/kill` the session and `/session <backend>` again
+- Confirm your build includes the fix: `git log --oneline -1` should be at or after `v0.10.1`
 
 ### Route hints not appearing
 
