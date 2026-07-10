@@ -24,6 +24,9 @@ type SessionManager struct {
 	autoRestart map[session.Backend]bool
 	events      chan SessionEvent
 	stopWatch   chan struct{}
+	stopOnce    sync.Once
+	shutdown    bool // set once Shutdown() has started; permanently blocks late writes from checkSessions' auto-restart
+	generation  int  // bumped by Shutdown()/KillAll(); lets checkSessions() detect a kill-all happened while it was mid-restart
 }
 
 type managedSession struct {
@@ -45,6 +48,16 @@ func NewSessionManager() *SessionManager {
 // Events returns the read-only channel for session lifecycle events.
 func (m *SessionManager) Events() <-chan SessionEvent {
 	return m.events
+}
+
+// stopWatcher signals WatchSessions' goroutine to stop. Closing the channel
+// (instead of a non-blocking send) guarantees the signal is never dropped,
+// regardless of what the watcher goroutine is doing at the moment this is
+// called. Safe to call more than once (Shutdown and KillAll can both call it).
+func (m *SessionManager) stopWatcher() {
+	m.stopOnce.Do(func() {
+		close(m.stopWatch)
+	})
 }
 
 // SetAutoRestart enables or disables auto-restart for a backend.
@@ -78,6 +91,7 @@ func (m *SessionManager) WatchSessions() {
 func (m *SessionManager) checkSessions() {
 	m.mu.Lock()
 
+	gen := m.generation
 	var deadBackends []session.Backend
 	for backend, ms := range m.sessions {
 		if !ms.sess.Alive() {
@@ -124,18 +138,33 @@ func (m *SessionManager) checkSessions() {
 				})
 			} else {
 				m.mu.Lock()
-				m.sessions[backend] = &managedSession{
-					sess:         sess,
-					startedAt:    time.Now(),
-					restartCount: restartCount + 1,
-					lastOutput:   time.Now(),
+				// While this restart Spawn() was running unlocked, the
+				// manager may have been shut down or KillAll'd (generation
+				// bumped), or a concurrent Spawn/SpawnOrSwitch call may have
+				// already created a new session for this backend. In any of
+				// those cases, writing our restarted session into the map
+				// would orphan/overwrite something — kill our redundant one
+				// instead.
+				_, alreadyReplaced := m.sessions[backend]
+				discard := m.shutdown || m.generation != gen || alreadyReplaced
+				if !discard {
+					m.sessions[backend] = &managedSession{
+						sess:         sess,
+						startedAt:    time.Now(),
+						restartCount: restartCount + 1,
+						lastOutput:   time.Now(),
+					}
 				}
 				m.mu.Unlock()
 
-				m.emitEvent(SessionEvent{
-					Type:    "restarted",
-					Backend: backend,
-				})
+				if discard {
+					sess.Kill()
+				} else {
+					m.emitEvent(SessionEvent{
+						Type:    "restarted",
+						Backend: backend,
+					})
+				}
 			}
 		}
 
@@ -161,12 +190,10 @@ func (m *SessionManager) emitEvent(event SessionEvent) {
 // 4. Returns only when all PTY fds are closed
 func (m *SessionManager) Shutdown() {
 	// Stop the watcher first
-	select {
-	case m.stopWatch <- struct{}{}:
-	default:
-	}
+	m.stopWatcher()
 
 	m.mu.Lock()
+	m.shutdown = true
 	if len(m.sessions) == 0 {
 		m.mu.Unlock()
 		return
@@ -236,12 +263,20 @@ forceKill:
 	}
 	wg.Wait()
 
-	// Emit killed events
+	// Emit killed events only for the sessions that actually had to be
+	// force-killed — sessions that already exited gracefully within the
+	// deadline were removed from `remaining` above and must not be
+	// relabeled as "killed" here.
 	for _, e := range entries {
-		m.emitEvent(SessionEvent{
-			Type:    "killed",
-			Backend: e.backend,
-		})
+		for _, r := range remaining {
+			if r == e.ms {
+				m.emitEvent(SessionEvent{
+					Type:    "killed",
+					Backend: e.backend,
+				})
+				break
+			}
+		}
 	}
 }
 
@@ -320,12 +355,16 @@ func (m *SessionManager) Kill(backend session.Backend) error {
 // KillAll terminates all sessions.
 func (m *SessionManager) KillAll() {
 	// Stop the watcher
-	select {
-	case m.stopWatch <- struct{}{}:
-	default:
-	}
+	m.stopWatcher()
 
 	m.mu.Lock()
+	// Bump the generation so any auto-restart from checkSessions() that was
+	// already in flight (Spawn() running unlocked) discards its result
+	// instead of writing into the map after we've cleared it. Unlike
+	// Shutdown(), this does NOT permanently disable future restarts —
+	// KillAll() can be called mid-session (e.g. `/kill all`) and the
+	// manager keeps running afterward.
+	m.generation++
 	toKill := make([]*session.Session, 0, len(m.sessions))
 	for _, ms := range m.sessions {
 		toKill = append(toKill, ms.sess)

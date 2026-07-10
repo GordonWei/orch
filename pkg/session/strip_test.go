@@ -188,3 +188,90 @@ func TestStripANSI_PlainText(t *testing.T) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
+
+// TestStripANSI_CJKNotCorrupted guards against treating UTF-8 continuation
+// bytes as C1 control-code introducers. Each of these Traditional Chinese
+// characters has a continuation byte that lands on 0x90/0x98/0x9B/0x9E/0x9F
+// — the exact single-byte C1 values Strip() checks for.
+func TestStripANSI_CJKNotCorrupted(t *testing.T) {
+	cases := []string{
+		"請幫我寫會議記錄",      // 記 = E8 A8 98 (continuation byte 0x98)
+		"然後同步到 Notion",   // 同 = E5 90 8C (continuation byte 0x90)
+		"整理架構文件",        // 架 = E6 9E B6 (continuation byte 0x9E)
+		"換一種寫法",         // 換 = E6 8F 9B (continuation byte 0x9B)
+	}
+	for _, input := range cases {
+		got := stripANSI(input)
+		if got != input {
+			t.Errorf("stripANSI(%q) = %q, want unchanged %q", input, got, input)
+		}
+	}
+}
+
+// TestStripANSI_CJKWithANSI checks that CJK text mixed with real ANSI
+// sequences still strips the sequences correctly without corrupting the text.
+func TestStripANSI_CJKWithANSI(t *testing.T) {
+	input := "\x1b[1;32m會議記錄\x1b[0m：同步到 Notion 並整理架構文件"
+	want := "會議記錄：同步到 Notion 並整理架構文件"
+	got := stripANSI(input)
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// TestStripState_PartialAltScreenSequence covers the specific gap the code
+// review found untested: a chunk boundary landing INSIDE an alt-screen
+// enter/leave CSI sequence (not just a bare trailing ESC).
+func TestStripState_PartialAltScreenSequence(t *testing.T) {
+	st := &StripState{}
+
+	// Enter sequence "\x1b[?1049h" split right after the params, before the
+	// final byte.
+	r1 := st.Strip("before\x1b[?104")
+	if r1 != "before" {
+		t.Errorf("chunk1: got %q, want %q", r1, "before")
+	}
+	if st.InAltScreen {
+		t.Errorf("chunk1: InAltScreen should still be false (sequence incomplete)")
+	}
+
+	r2 := st.Strip("9hTUI content")
+	if r2 != "" {
+		t.Errorf("chunk2: got %q, want empty (now inside alt screen)", r2)
+	}
+	if !st.InAltScreen {
+		t.Fatalf("chunk2: InAltScreen should be true after completed enter sequence")
+	}
+
+	// Leave sequence "\x1b[?1049l" split the same way.
+	r3 := st.Strip("\x1b[?104")
+	if r3 != "" {
+		t.Errorf("chunk3: got %q, want empty", r3)
+	}
+	if !st.InAltScreen {
+		t.Errorf("chunk3: InAltScreen should still be true (leave sequence incomplete)")
+	}
+
+	r4 := st.Strip("9lafter")
+	if r4 != "after" {
+		t.Errorf("chunk4: got %q, want %q", r4, "after")
+	}
+	if st.InAltScreen {
+		t.Errorf("chunk4: InAltScreen should be false after completed leave sequence")
+	}
+}
+
+// TestStripState_PartialEscapeKnownTwoChar ensures a bare trailing ESC that
+// turns out (once reunited with the next chunk) to be a recognized two-char
+// sequence like ESC 8 (DECRC) is still consumed as one, not leaked as text.
+func TestStripState_PartialEscapeKnownTwoChar(t *testing.T) {
+	st := &StripState{}
+	r1 := st.Strip("hello\x1b")
+	if r1 != "hello" {
+		t.Errorf("chunk1: got %q, want %q", r1, "hello")
+	}
+	r2 := st.Strip("8world")
+	if r2 != "world" {
+		t.Errorf("chunk2: got %q, want %q (ESC 8 should be consumed, not leaked)", r2, "world")
+	}
+}

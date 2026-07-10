@@ -488,6 +488,26 @@ npm install -g @anthropic-ai/gemini  # or: brew install gemini
 
 ## Changelog
 
+### v0.10.1 (2026-07-10)
+
+**Session mode hardening, round 2 — fixing bugs the "hardening" release introduced.**
+
+An 8-angle code review of the v0.10.0 diff found 9 confirmed bugs (all verified against actual code behavior, not just read) — several of them directly contradicting v0.10.0's "no more orphan processes" / "crash resilience" claims. All fixed, with regression tests added for the two that were pure-function-testable.
+
+- **ANSI strip: UTF-8 safety** — `Strip()` checked C1 control bytes (0x90/0x98/0x9B/0x9E/0x9F) by raw byte value with no UTF-8 awareness. Traditional Chinese text routinely hits these exact byte values as continuation bytes (e.g. 記 → `E8 A8 98`), so ordinary CJK session output was getting silently truncated. Now decodes with `utf8.DecodeRuneInString` first; valid multi-byte runes pass through untouched, and only genuinely invalid/stray high bytes are checked against the C1 table.
+- **ANSI strip: sequences split across PTY reads** — `StripState` tracked `InAltScreen` across chunked `Read()` calls but never buffered a truncated escape sequence, so a CSI/OSC/DCS sequence landing on a 4096-byte chunk boundary got silently dropped instead of completed — in the worst case (alt-screen leave sequence split) a session would go permanently blank with no error. `StripState` now buffers the incomplete tail in a `pending` field and prepends it to the next `Strip()` call.
+- **Idle detection starved during alt-screen** — `idle.Ping()` only fired when cleaned output was non-blank; since alt-screen suppresses all output, a TUI backend rendering for longer than `IdleTime` (default 5s) would let the idle timer expire mid-render, `Read()` would return early, and the real answer (written once alt-screen exits) was lost — the next `Send()` resets the output buffer before anyone read it. `Ping()` now fires on any PTY read activity, not just non-blank cleaned output.
+- **`Session.Kill()` deadlock** — held its mutex across the blocking wait on `<-s.done`, but `readLoop`'s cleanup (the only code that closes `s.done`) needs that same mutex first. Killing a live session would hang forever. Lock is now released before waiting.
+- **`checkSessions()` auto-restart races** — unlocked between deleting a dead session and writing back its replacement, with no protection against a concurrent user `Spawn()`/`SpawnOrSwitch()` (silently overwritten, orphaning the user's process) or a concurrent `Shutdown()`/`KillAll()` (restarted session written into the map *after* shutdown believed everything was torn down). Added a `generation` counter (bumped by `KillAll()`) plus a permanent `shutdown` flag (`Shutdown()`) that `checkSessions()` checks before writing back — on conflict it kills its own redundant restart instead of overwriting.
+- **`stopWatch` signal could be dropped** — the non-blocking `select { case stopWatch <- struct{}{}: default: }` silently dropped the stop signal if the watcher goroutine was mid-`checkSessions()`, leaking the ticker goroutine forever (and, post-`KillAll()`, letting it resurrect a backend later). Changed to `close(stopWatch)` behind a `sync.Once` — closing a channel can't be dropped or missed regardless of timing.
+- **`Shutdown()` mislabeled graceful exits as "killed"** — the final event-emission loop iterated over the full original session set instead of just the subset that actually needed force-killing, so sessions that exited cleanly within the 5s deadline got an incorrect `killed` event anyway.
+- **Ctrl+C had zero grace period outside session mode** — v0.10.0 replaced the old unconditional 500ms shutdown sleep with a hook that's only registered inside `runREPL()`; one-shot (`orch "prompt"`) and subcommand (`orch history`/`orch briefing`) invocations got zero grace period on Ctrl+C. Restored the 500ms fallback when no hook is registered.
+- **Ctrl+C had no escape hatch during a slow shutdown** — the signal handler read `sigCh` exactly once; a second impatient Ctrl+C during session mode's up-to-8s `Shutdown()` sequence did nothing. Shutdown now runs in a background goroutine while the handler keeps listening — a second signal forces an immediate exit.
+
+**Not changed**: `route_hint.go`'s 73-rule keyword table duplicates keyword-routing logic that already lives in `pkg/config` (`Routing`/`KeywordShortcuts`) and `pkg/planner` (`classifyInputType`) — flagged as a design/maintainability concern (not a bug), left as-is pending a deliberate decision on whether to consolidate.
+
+- **Test coverage**: 5 new regression tests (CJK text integrity, CJK+ANSI mixed, alt-screen sequence split across chunks, known two-char ESC sequence split across chunks). `go build`/`go vet`/`go test -race ./...` all clean.
+
 ### v0.10.0 (2026-07-10)
 
 **Session mode hardening — ANSI strip, intelligent route hints, crash resilience.**

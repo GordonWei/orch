@@ -166,9 +166,10 @@ func (s *Session) IsIdle() bool {
 // Kill terminates the session immediately.
 func (s *Session) Kill() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	exited := s.exited
+	s.mu.Unlock()
 
-	if s.exited {
+	if exited {
 		return nil
 	}
 
@@ -179,7 +180,10 @@ func (s *Session) Kill() error {
 	}
 	s.ptmx.Write([]byte(exitCmd))
 
-	// Give it 3 seconds to exit gracefully
+	// Give it 3 seconds to exit gracefully. Note: s.mu must NOT be held
+	// while waiting on s.done — readLoop's own cleanup (which closes
+	// s.done) needs to acquire s.mu first, so holding it here would
+	// deadlock against the very signal we're waiting for.
 	select {
 	case <-s.done:
 		return nil
@@ -226,8 +230,15 @@ func (s *Session) readLoop() {
 				s.mu.Lock()
 				s.output.WriteString(cleaned)
 				s.mu.Unlock()
-				s.idle.Ping()
 			}
+			// Any PTY activity resets the idle timer, even when the cleaned
+			// output is empty (e.g. while the backend is drawing an
+			// alt-screen TUI/spinner). If Ping only fired on non-blank
+			// output, the idle timer could expire mid-render, Read() would
+			// return prematurely, and the real answer written once the TUI
+			// exits alt-screen would never be observed (the next Send()
+			// resets the output buffer before anyone reads it).
+			s.idle.Ping()
 		}
 		if err != nil {
 			if err != io.EOF {

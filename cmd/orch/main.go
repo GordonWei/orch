@@ -73,12 +73,32 @@ func main() {
 		sig := <-sigCh
 		fmt.Fprintf(os.Stderr, "\n⚡ received %v, shutting down...\n", sig)
 		cancel()
-		// Run registered shutdown hooks (e.g. session manager)
+
+		// Run registered shutdown hooks (e.g. session manager) in the
+		// background so a second Ctrl+C can still force an immediate exit
+		// even if the hook (session Shutdown() can take up to ~8s) hangs.
 		shutdownMu.Lock()
 		fn := shutdownFunc
 		shutdownMu.Unlock()
-		if fn != nil {
-			fn()
+
+		done := make(chan struct{})
+		go func() {
+			if fn != nil {
+				fn()
+			} else {
+				// No shutdown hook registered (one-shot/subcommand mode
+				// never enters the REPL, so RegisterShutdown was never
+				// called) — give in-flight work a brief grace period,
+				// matching the previous unconditional behavior.
+				time.Sleep(500 * time.Millisecond)
+			}
+			close(done)
+		}()
+
+		select {
+		case <-done:
+		case <-sigCh:
+			fmt.Fprintf(os.Stderr, "\n⚡ received second signal, forcing exit...\n")
 		}
 		os.Exit(130)
 	}()
