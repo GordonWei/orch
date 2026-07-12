@@ -414,19 +414,19 @@ steps:
 ```
 cmd/orch/
 ├── main.go              CLI entry + signal handler + task execution
-├── repl.go              REPL interactive mode (session mode, slash commands)
+├── repl.go              REPL interactive mode (session mode, slash commands, /auto)
 ├── session_manager.go   Multi-session lifecycle manager (spawn/switch/kill/watch/auto-restart/shutdown)
-├── route_hint.go        Intelligent cross-domain route suggestions (73 rules, 3-tier confidence)
 ├── init.go              Interactive setup wizard
 ├── printer.go           Event output formatting
 └── dag.go               ASCII DAG rendering
 
 pkg/
 ├── backend/         AI CLI backend interface + adapters (kiro/claude/gemini) + timeout
-├── config/          Config loader (YAML → struct)
+├── config/          Config loader (YAML → struct, including route rules)
 ├── model/           Local LLM interface (OpenAI-compatible) + MLX auto-start with progress
 ├── memory/          SQLite memory layer (history + briefing + auto-prune)
 ├── registry/        Local tool scanner (which CLIs are on this machine)
+├── router/          Unified routing: keyword/phrase hints, CLI detection, chat matching, history momentum, auto-route
 ├── planner/         3-layer routing: keyword/CLI detect → MLX classification → cloud
 ├── executor/        DAG parallel execution engine (goroutines + streaming)
 ├── eventbus/        Reactive workflow chaining (trigger rules + MLX gate + summarize)
@@ -488,6 +488,20 @@ npm install -g @anthropic-ai/gemini  # or: brew install gemini
 
 ## Changelog
 
+### v0.11.0 (2026-07-12)
+
+**Unified routing package — config-driven rules, auto-route, history-aware suggestions.**
+
+The route hint system has been fully extracted from a hardcoded 73-rule function (`route_hint.go`) into a configurable, testable package (`pkg/router/`). Routing decisions are now data-driven via `config.yaml`, thread-safe, and enhanced with context-aware history momentum.
+
+- **New: `pkg/router/` unified routing package** — Consolidates keyword→backend hints, CLI detection (`ClassCommand`), chat pattern matching (`ClassChat`), and natural language classification (`ClassNaturalLanguage`) into a single component. Replaces both `RouteHinter` (route_hint.go) and the inline `classifyInputType()` heuristics. Note: CLI detection and chat-pattern matching are config-driven via `route_rules.rules[]`; the technical-keyword list that decides NaturalLanguage vs. Chat (`Classify()` step 2) is still a hardcoded slice in `router.go`, not yet moved to config.
+- **New: `/auto` command for auto-route mode** — Toggle automatic session switching in REPL: when enabled, strong keyword matches (strength ≥ 3) auto-switch to the appropriate backend without requiring manual `/switch`. Both the switch-existing-session and spawn-new-session failure paths now report an error to the user instead of failing silently.
+- **Built but not yet wired in: `SuggestBackend()` / history momentum** — Combines keyword matching with a history-momentum signal (≥ 3 of the last N inputs to the same backend boosts ambiguous matches toward that backend). Fully implemented, tested, and thread-safe, but not yet called from the `/auto` hint flow in `repl.go` — currently reachable only via direct `Router.SuggestBackend()` calls (e.g. from tests). Wiring it into live auto-routing is a deliberate follow-up, not done here. Fixed a related bug in `historyMomentum()`: the dominant-backend lookup iterated a Go map, which is a non-deterministic order — with the default `history_size: 5` a tie is mathematically impossible so this never surfaced, but a larger configured `history_size` could let two backends both cross the threshold and get a random "winner" each call. Now iterates in first-seen order for a deterministic result.
+- **Refactor: Route rules moved from hardcoded to config-driven** — Phrase/keyword/cli/chat rules (except the step-2 tech-keyword list noted above) now live in `config.yaml` under `route_rules.rules[]`. Each rule has `type` (phrase/keyword/cli/chat), `pattern`, `target`, and `strength`.
+- **Refactor: Removed `route_hint.go`** — All functionality consolidated into `pkg/router/`. The `RouteHinter`, `NewRouteHinter()`, `RouteHint()`, and `routeRule` types are gone. `repl.go` and `main.go` now use `router.New(cfg.RouteRules)` exclusively. Also removed `planner.NewWithRouter()`, a wrapper added in this same change that had zero callers — `planner.New()` already accepts a `*router.Router` directly.
+- **Not actually resolved: `cfg.Routing` (`map[string][]string`, yaml `routing`)** — This field was named alongside `route_hint.go` in the v0.10.1 "not changed" note below as part of the same duplication concern. It is unrelated to this refactor's scope and remains completely unused by any production code path (confirmed via `git grep` against the pre-refactor commit) — this change even adds a `config_test.go` assertion on its default population, which pins the dead field down further rather than removing it. `KeywordShortcuts` (the other field named in that note) turned out to serve a distinct purpose — a shell-command category shortcut in `planner.tryKeywordPlan()`, unrelated to backend routing — so it was correctly left alone. Left `cfg.Routing` as-is pending a decision on whether to delete it outright.
+- **Tests: Comprehensive router coverage** — 12 test functions in `pkg/router/router_test.go` covering CLI classification (35 subtests), chat detection (27 subtests), natural language (17 subtests), cross-domain hints, cooldown, strength filtering, phrase priority, history momentum, and thread safety (220 concurrent goroutines). Additional edge-case tests in `pkg/config/config_test.go` (7 tests) and `pkg/planner/planner_test.go` (7 new tests for classifyInputType with emoji, multi-line, very short/long inputs, code snippets, and ambiguous cases).
+
 ### v0.10.1 (2026-07-10)
 
 **Session mode hardening, round 2 — fixing bugs the "hardening" release introduced.**
@@ -504,7 +518,7 @@ An 8-angle code review of the v0.10.0 diff found 9 confirmed bugs (all verified 
 - **Ctrl+C had zero grace period outside session mode** — v0.10.0 replaced the old unconditional 500ms shutdown sleep with a hook that's only registered inside `runREPL()`; one-shot (`orch "prompt"`) and subcommand (`orch history`/`orch briefing`) invocations got zero grace period on Ctrl+C. Restored the 500ms fallback when no hook is registered.
 - **Ctrl+C had no escape hatch during a slow shutdown** — the signal handler read `sigCh` exactly once; a second impatient Ctrl+C during session mode's up-to-8s `Shutdown()` sequence did nothing. Shutdown now runs in a background goroutine while the handler keeps listening — a second signal forces an immediate exit.
 
-**Not changed**: `route_hint.go`'s 73-rule keyword table duplicates keyword-routing logic that already lives in `pkg/config` (`Routing`/`KeywordShortcuts`) and `pkg/planner` (`classifyInputType`) — flagged as a design/maintainability concern (not a bug), left as-is pending a deliberate decision on whether to consolidate.
+**Not changed** (partially resolved in v0.11.0): `route_hint.go`'s 73-rule keyword table duplicated keyword-routing logic that already lived in `pkg/planner` (`classifyInputType`) — that half was consolidated into `pkg/router/` in v0.11.0. The `pkg/config` half (`cfg.Routing`) turned out to be dead code with zero production callers rather than a true duplicate, and is still there — see the v0.11.0 entry above.
 
 - **Test coverage**: 5 new regression tests (CJK text integrity, CJK+ANSI mixed, alt-screen sequence split across chunks, known two-char ESC sequence split across chunks). `go build`/`go vet`/`go test -race ./...` all clean.
 

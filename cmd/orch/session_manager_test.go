@@ -1,7 +1,6 @@
 package main
 
 import (
-	"strings"
 	"testing"
 	"time"
 
@@ -111,80 +110,6 @@ func TestSessionManager_WatchSessions_Stop(t *testing.T) {
 	sm.Shutdown()
 }
 
-func TestRouteHinter_Basic(t *testing.T) {
-	h := NewRouteHinter()
-
-	// Strong signal: terraform should suggest kiro when in claude
-	suggested, kw, reason := h.Hint("run terraform plan", session.BackendClaude)
-	if suggested != session.BackendKiro {
-		t.Errorf("expected kiro suggestion, got %q", suggested)
-	}
-	if kw == "" {
-		t.Error("expected keyword match")
-	}
-	if reason == "" {
-		t.Error("expected reason string")
-	}
-}
-
-func TestRouteHinter_NoCrossDomain(t *testing.T) {
-	h := NewRouteHinter()
-
-	// terraform in kiro should not suggest switch
-	suggested, _, _ := h.Hint("terraform apply", session.BackendKiro)
-	if suggested != "" {
-		t.Errorf("expected no suggestion for same domain, got %q", suggested)
-	}
-}
-
-func TestRouteHinter_Cooldown(t *testing.T) {
-	h := NewRouteHinter()
-
-	// First hint should work
-	suggested1, _, _ := h.Hint("terraform plan", session.BackendClaude)
-	if suggested1 == "" {
-		t.Fatal("first hint should trigger")
-	}
-
-	// Next 2 should be suppressed by cooldown (cooldown=3)
-	suggested2, _, _ := h.Hint("kubectl get pods", session.BackendClaude)
-	if suggested2 != "" {
-		t.Error("second hint should be suppressed by cooldown")
-	}
-
-	suggested3, _, _ := h.Hint("helm upgrade", session.BackendClaude)
-	if suggested3 != "" {
-		t.Error("third hint should be suppressed by cooldown")
-	}
-
-	// After cooldown expires, should work again
-	suggested4, _, _ := h.Hint("docker build", session.BackendClaude)
-	if suggested4 == "" {
-		t.Error("fourth hint (after cooldown) should trigger")
-	}
-}
-
-func TestRouteHinter_WeakSignalIgnored(t *testing.T) {
-	h := NewRouteHinter()
-
-	// "test" is strength 1 (weak) — should not trigger
-	suggested, _, _ := h.Hint("run the test", session.BackendClaude)
-	if suggested != "" {
-		t.Errorf("weak signal 'test' should not trigger, got %q", suggested)
-	}
-}
-
-func TestRouteHint_BackwardCompat(t *testing.T) {
-	// The global RouteHint function should still work
-	suggested, kw := RouteHint("sync to notion please", session.BackendKiro)
-	if suggested != session.BackendClaude {
-		t.Errorf("expected claude suggestion, got %q", suggested)
-	}
-	if kw == "" {
-		t.Error("expected keyword")
-	}
-}
-
 func TestStripState_Stateful(t *testing.T) {
 	st := &session.StripState{}
 
@@ -210,59 +135,5 @@ func TestStripState_Stateful(t *testing.T) {
 	got4 := st.Strip("\x1b[?1049l real output")
 	if got4 != " real output" {
 		t.Errorf("after alt screen: got %q, want %q", got4, " real output")
-	}
-}
-
-func TestRouteHinter_ChineseKeywords(t *testing.T) {
-	h := NewRouteHinter()
-
-	// "部署" (strength 3) in claude session → should suggest kiro
-	suggested, kw, reason := h.Hint("幫我部署這個服務到 GKE", session.BackendClaude)
-	if suggested != session.BackendKiro {
-		t.Errorf("expected kiro for 部署, got %q", suggested)
-	}
-	if kw != "部署" {
-		t.Errorf("expected keyword 部署, got %q", kw)
-	}
-	if reason == "" {
-		t.Error("expected non-empty reason")
-	}
-	// Reason should be in Chinese and contain the keyword
-	if !strings.Contains(reason, "部署") {
-		t.Errorf("reason should mention the keyword, got: %s", reason)
-	}
-}
-
-func TestRouteHinter_NoSuggestionSameDomain(t *testing.T) {
-	h := NewRouteHinter()
-
-	// "notion" in claude → same domain, no suggestion
-	suggested, _, _ := h.Hint("update the notion page with meeting notes", session.BackendClaude)
-	if suggested != "" {
-		t.Errorf("should not suggest switch for same domain, got %q", suggested)
-	}
-}
-
-func TestRouteHinter_PhrasePriority(t *testing.T) {
-	h := NewRouteHinter()
-
-	// "terraform plan" should trigger with strength 3
-	suggested, kw, _ := h.Hint("run terraform plan for litellm-gke", session.BackendClaude)
-	if suggested != session.BackendKiro {
-		t.Errorf("expected kiro, got %q", suggested)
-	}
-	// Should preferentially match the longer phrase
-	if kw != "terraform plan" && kw != "terraform" {
-		t.Errorf("expected terraform-related keyword, got %q", kw)
-	}
-}
-
-func TestRouteHinter_NotionInKiro(t *testing.T) {
-	h := NewRouteHinter()
-
-	// "notion" (strength 3) in kiro session → should suggest claude
-	suggested, _, _ := h.Hint("同步到 notion 交接表", session.BackendKiro)
-	if suggested != session.BackendClaude {
-		t.Errorf("expected claude for notion, got %q", suggested)
 	}
 }

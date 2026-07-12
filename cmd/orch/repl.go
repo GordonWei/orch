@@ -14,6 +14,7 @@ import (
 	"github.com/gordonwei/orch/pkg/executor"
 	"github.com/gordonwei/orch/pkg/memory"
 	"github.com/gordonwei/orch/pkg/registry"
+	"github.com/gordonwei/orch/pkg/router"
 	"github.com/gordonwei/orch/pkg/session"
 	"github.com/gordonwei/orch/pkg/workflow"
 )
@@ -33,6 +34,9 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br
 		return
 	}
 	defer rl.Close()
+
+	// Create router instance for route hints and auto-routing
+	rt := router.New(cfg.RouteRules)
 
 	// Session context: keeps recent conversation turns for backend context injection
 	replSession := &sessionContext{maxTurns: 5}
@@ -103,7 +107,7 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br
 
 		// Slash commands are handled in both modes
 		if strings.HasPrefix(input, "/") {
-			handleSlashCommand(rl, reg, cfg, store, br, bus, sm, input)
+			handleSlashCommand(rl, reg, cfg, store, br, bus, sm, rt, input)
 			continue
 		}
 
@@ -117,9 +121,50 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br
 			}
 
 			// Route hint: suggest switching if input matches cross-domain keywords
-			if suggested, kw := RouteHint(input, sm.ActiveBackend()); suggested != "" {
-				fmt.Fprintf(os.Stderr, "💡 \"%s\" → might be better in %s (/switch %s)\n", kw, suggested, suggested)
+			hint := rt.Hint(input, sm.ActiveBackend())
+			if hint.Suggested != "" {
+				fmt.Fprintf(os.Stderr, "💡 \"%s\" → might be better in %s (/switch %s)\n", hint.Keyword, hint.Suggested, hint.Suggested)
+
+				// Auto-route: if enabled and strong signal, switch automatically
+				if rt.AutoRoute() && hint.Strength >= 3 {
+					if sm.Get(hint.Suggested) != nil {
+						// Session already exists → just switch
+						if err := sm.Switch(hint.Suggested); err == nil {
+							fmt.Fprintf(os.Stderr, "🔀 auto-routed to %s (matched: \"%s\")\n", hint.Suggested, hint.Keyword)
+							sess = sm.Active()
+						} else {
+							fmt.Fprintf(os.Stderr, "⚠️  auto-route switch failed: %v\n", err)
+						}
+					} else {
+						// No session → spawn + switch + forward
+						fmt.Fprintf(os.Stderr, "🔀 auto-routed to %s (matched: \"%s\")\n", hint.Suggested, hint.Keyword)
+						if err := sm.SpawnOrSwitch(hint.Suggested); err == nil {
+							time.Sleep(2 * time.Second)
+							sess = sm.Active()
+							if sess != nil {
+								banner := sess.ReadRaw()
+								if banner != "" {
+									fmt.Print(banner)
+									if !strings.HasSuffix(banner, "\n") {
+										fmt.Println()
+									}
+								}
+							}
+						} else {
+							fmt.Fprintf(os.Stderr, "⚠️  auto-route spawn failed: %v\n", err)
+						}
+					}
+					// Update sess to the newly-active session
+					sess = sm.Active()
+					if sess == nil {
+						fmt.Fprintf(os.Stderr, "⚠️  session not available after auto-route\n")
+						continue
+					}
+				}
 			}
+
+			// Record input for history analysis
+			rt.RecordInput(input, sm.ActiveBackend())
 
 			if err := sess.Send(input); err != nil {
 				fmt.Fprintf(os.Stderr, "❌ send failed: %v\n", err)
@@ -196,7 +241,7 @@ func (s *sessionContext) buildContext() string {
 
 // ===== REPL Slash Commands =====
 
-func handleSlashCommand(rl *readline.Instance, reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry, bus *eventbus.Bus, sm *SessionManager, input string) {
+func handleSlashCommand(rl *readline.Instance, reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry, bus *eventbus.Bus, sm *SessionManager, rt *router.Router, input string) {
 	parts := strings.Fields(input)
 	cmd := strings.ToLower(parts[0])
 	args := parts[1:]
@@ -219,6 +264,9 @@ func handleSlashCommand(rl *readline.Instance, reg *registry.Registry, cfg *conf
 
 	case "/kill":
 		handleKillCmd(sm, args)
+
+	case "/auto":
+		handleAutoCmd(rt, args)
 
 	case "/w", "/workflows":
 		if len(args) > 0 {
@@ -388,6 +436,33 @@ func parseBackend(s string) session.Backend {
 	}
 }
 
+// --- Auto-route command ---
+
+func handleAutoCmd(rt *router.Router, args []string) {
+	if len(args) == 0 {
+		// Toggle
+		current := rt.AutoRoute()
+		rt.SetAutoRoute(!current)
+		if !current {
+			fmt.Fprintf(os.Stderr, "🔀 auto-route: ON (strong matches will auto-switch sessions)\n")
+		} else {
+			fmt.Fprintf(os.Stderr, "🔀 auto-route: OFF (hints only, no auto-switch)\n")
+		}
+		return
+	}
+
+	switch strings.ToLower(args[0]) {
+	case "on":
+		rt.SetAutoRoute(true)
+		fmt.Fprintf(os.Stderr, "🔀 auto-route: ON (strong matches will auto-switch sessions)\n")
+	case "off":
+		rt.SetAutoRoute(false)
+		fmt.Fprintf(os.Stderr, "🔀 auto-route: OFF (hints only, no auto-switch)\n")
+	default:
+		fmt.Fprintf(os.Stderr, "Usage: /auto [on|off]\n")
+	}
+}
+
 // --- Help ---
 
 func printREPLHelp(sm *SessionManager) {
@@ -400,6 +475,7 @@ func printREPLHelp(sm *SessionManager) {
     /sessions               — list all running sessions
     /back                   — return to normal mode (session stays alive)
     /kill [backend|all]     — terminate a session
+    /auto [on|off]          — toggle auto-route (strong keywords auto-switch)
     Ctrl+C                  — same as /back
 
   Normal Mode:

@@ -19,6 +19,7 @@ import (
 	"github.com/gordonwei/orch/pkg/model"
 	"github.com/gordonwei/orch/pkg/planner"
 	"github.com/gordonwei/orch/pkg/registry"
+	"github.com/gordonwei/orch/pkg/router"
 )
 
 // version is set at build time via -ldflags "-X main.version=v0.4"
@@ -403,7 +404,8 @@ Output only the briefing text, no titles or formatting.`, sb.String())
 func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry, bus *eventbus.Bus, prompt string, dryRun bool) (bool, string) {
 	// 1. Plan
 	fmt.Fprintf(os.Stderr, "🧠 planning...\n")
-	p := planner.New(reg, cfg, br)
+	r := router.New(cfg.RouteRules)
+	p := planner.New(reg, cfg, br, r)
 	p.Verbose = verbose
 	plan, err := p.GeneratePlan(prompt)
 	if err != nil {

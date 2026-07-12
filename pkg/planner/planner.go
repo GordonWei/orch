@@ -12,6 +12,7 @@ import (
 	"github.com/gordonwei/orch/pkg/backend"
 	"github.com/gordonwei/orch/pkg/config"
 	"github.com/gordonwei/orch/pkg/registry"
+	"github.com/gordonwei/orch/pkg/router"
 )
 
 // Step represents a single step in an execution plan.
@@ -78,19 +79,29 @@ type Planner struct {
 	registry    *registry.Registry
 	cfg         *config.Config
 	backendReg  *backend.Registry
+	router      *router.Router
 	mlxEndpoint string
 	mlxModel    string
 	Verbose     bool
 }
 
-func New(reg *registry.Registry, cfg *config.Config, br *backend.Registry) *Planner {
+func New(reg *registry.Registry, cfg *config.Config, br *backend.Registry, r *router.Router) *Planner {
+	if r == nil {
+		r = router.New(cfg.RouteRules)
+	}
 	return &Planner{
 		registry:    reg,
 		cfg:         cfg,
 		backendReg:  br,
+		router:      r,
 		mlxEndpoint: cfg.LocalLLM.Endpoint,
 		mlxModel:    cfg.LocalLLM.Model,
 	}
+}
+
+// Router returns the planner's router instance for external use.
+func (p *Planner) Router() *router.Router {
+	return p.router
 }
 
 func (p *Planner) GeneratePlan(userInput string) (*Plan, error) {
@@ -146,8 +157,15 @@ func (p *Planner) tryKeywordPlan(input string) *Plan {
 	lower := strings.ToLower(input)
 
 	// Chat/greeting detection — route directly to local agent, skip MLX planning.
-	// Uses the same classifyInputType() as fixPlan()'s reroute logic (single source of truth).
-	if classifyInputType(input) == inputTypeChat {
+	// Uses the router's Classify() method (single source of truth).
+	// Falls back to package-level classifyInputType if router is nil (test compat).
+	var isChat bool
+	if p.router != nil {
+		isChat = p.router.Classify(input) == router.ClassChat
+	} else {
+		isChat = classifyInputType(input) == inputTypeChat
+	}
+	if isChat {
 		return &Plan{
 			TaskSummary: input,
 			Difficulty:  "simple",
@@ -530,7 +548,12 @@ func (p *Planner) fixPlan(plan *Plan, userInput string) *Plan {
 		}
 	}
 
-	isNaturalLanguage := looksLikeNaturalLanguage(userInput)
+	var isNaturalLanguage bool
+	if p.router != nil {
+		isNaturalLanguage = p.router.Classify(userInput) == router.ClassNaturalLanguage
+	} else {
+		isNaturalLanguage = classifyInputType(userInput) == inputTypeNaturalLanguage
+	}
 
 	for i := range plan.Steps {
 		step := &plan.Steps[i]
@@ -573,143 +596,23 @@ const (
 )
 
 // classifyInputType determines whether input is a CLI command, a natural language task, or chat.
-// This is the single source of truth for input classification: both tryKeywordPlan's Layer 1
-// chat short-circuit and fixPlan's shell/NL reroute check call this function. Do not add a
-// second classifier — extend the keyword lists below instead, or the two call sites can
-// silently disagree on the same input again.
+// This is a backward-compatible wrapper that delegates to the router package.
+// It uses a package-level router instance initialized with default config for standalone usage
+// (e.g., tests that call classifyInputType directly without a Planner).
 func classifyInputType(input string) inputType {
-	trimmed := strings.TrimSpace(input)
-	lower := strings.ToLower(trimmed)
-
-	// Step 1: Check if it's a direct CLI command (starts with known binary)
-	fields := strings.Fields(lower)
-	if len(fields) > 0 {
-		cliFirstWords := []string{
-			"kubectl", "k", "helm", "docker", "docker-compose", "podman",
-			"terraform", "tf", "tofu", "aws", "gcloud", "az",
-			"sam", "cdk", "pulumi",
-			"git", "gh", "glab", "npm", "pnpm", "yarn", "bun",
-			"cargo", "go", "make", "just", "pip", "poetry", "uv",
-			"ls", "cat", "grep", "find", "ps", "top", "df", "du",
-			"tail", "head", "wc", "ping", "curl", "wget",
-			"ssh", "scp", "rsync", "chmod", "chown", "mkdir",
-			"rm", "cp", "mv", "hostname", "whoami", "uname",
-			"sw_vers", "date", "which", "lsof", "netstat", "ifconfig",
-			"ip", "dig", "nslookup", "brew", "apt", "yum",
-			"echo", "cd",
-		}
-		for _, cli := range cliFirstWords {
-			if fields[0] == cli {
-				return inputTypeCommand
-			}
-		}
-		// Starts with common CLI prefixes
-		cliPrefixes := []string{"./", "/", "sudo "}
-		for _, prefix := range cliPrefixes {
-			if strings.HasPrefix(lower, prefix) {
-				return inputTypeCommand
-			}
-		}
-	}
-
-	// Step 2: Technical keywords → it's a task, not chat or a schema copy-paste.
-	// Checked before the greeting patterns in Step 3 so any tech context wins.
-	techIndicators := []string{
-		// Infrastructure & cloud
-		"kubectl", "helm", "terraform", "aws", "gcloud", "docker", "k8s", "kubernetes",
-		"gke", "eks", "ecs", "s3", "ec2", "lambda", "cloudformation", "sam ",
-		"cloud run", "bigquery", "vpc", "subnet", "firewall", "load balancer",
-		"ingress", "gateway", "metallb", "rke2", "pod", "deploy", "namespace",
-		"node", "cluster", "service", "service mesh", "istio", "envoy",
-		// Code & dev tools
-		"git", "npm", "pnpm", "yarn", "make", "cargo", "pip", "go build", "go test",
-		"compile", "build", "test", "debug", "lint", "refactor",
-		"function", "class", "struct", "interface", "endpoint", "api",
-		// Files & system
-		"file", "directory", "folder", "path", "config", "yaml", "json", "log",
-		"error", "fix", "bug", "issue", "merge", "branch",
-		// Specific tools
-		"notion", "slack", "jira", "confluence",
-		"litellm", "backstage", "grafana", "prometheus",
-		// Action verbs that indicate work
-		"整理", "部署", "同步", "查詢", "分析", "修正", "更新", "刪除", "建立",
-		"設定", "檢查", "監控", "備份", "還原", "執行", "啟動", "停止",
-		"plan", "apply",
-	}
-	for _, kw := range techIndicators {
-		if strings.Contains(lower, kw) {
-			return inputTypeNaturalLanguage
-		}
-	}
-
-	// Step 3: Explicit greeting/social patterns → chat, even for longer phrases that
-	// Step 6's length-based default wouldn't otherwise catch.
-	chatPatterns := []string{
-		"介紹", "你好", "嗨", "哈囉", "早安", "午安", "晚安",
-		"你是誰", "你是谁",
-		"謝謝", "谢谢", "感謝",
-		"再見", "掰掰", "拜拜",
-		"什麼是", "什么是",
-	}
-	for _, p := range chatPatterns {
-		if strings.Contains(lower, p) {
-			return inputTypeChat
-		}
-	}
-	engChatPatterns := []string{
-		"hello", "hey ", "who are you", "introduce yourself",
-		"thank you", "thanks", "bye", "goodbye", "good morning", "good night",
-		"what is your name", "tell me about yourself",
-	}
-	for _, p := range engChatPatterns {
-		if strings.Contains(lower, p) {
-			return inputTypeChat
-		}
-	}
-	// "hi" needs prefix match to avoid false positives like "sushi", "this"
-	if strings.HasPrefix(lower, "hi ") || lower == "hi" {
+	class := defaultRouter.Classify(input)
+	switch class {
+	case router.ClassCommand:
+		return inputTypeCommand
+	case router.ClassChat:
 		return inputTypeChat
-	}
-
-	// Step 4: Contains Chinese characters → check length as chat vs NL task
-	hasChinese := false
-	for _, r := range trimmed {
-		if r >= 0x4e00 && r <= 0x9fff {
-			hasChinese = true
-			break
-		}
-	}
-
-	if hasChinese {
-		// Short Chinese without tech/chat markers → likely chat.
-		// Tightened to <=10 (from 20) to avoid catching short tech queries like "查 S3" (6 chars).
-		if len([]rune(trimmed)) <= 10 {
-			return inputTypeChat
-		}
-		// Longer Chinese → natural language task
+	default:
 		return inputTypeNaturalLanguage
 	}
-
-	// Step 5: English — sentence structure indicates NL
-	if strings.Count(trimmed, " ") >= 3 {
-		return inputTypeNaturalLanguage
-	}
-
-	// Step 6: Starts with NL verb
-	nlVerbs := []string{"help", "list", "show", "check", "find", "get ", "tell", "what", "how", "why", "can ", "summarize", "analyze", "create", "write", "generate"}
-	for _, v := range nlVerbs {
-		if strings.HasPrefix(lower, v) {
-			return inputTypeNaturalLanguage
-		}
-	}
-
-	// Default: if short and no indicators, probably chat
-	if len(trimmed) < 15 {
-		return inputTypeChat
-	}
-
-	return inputTypeNaturalLanguage
 }
+
+// defaultRouter is a package-level router for backward compatibility with classifyInputType().
+var defaultRouter = router.New(config.Load().RouteRules)
 
 // looksInvalid checks whether command is obviously invalid
 func looksInvalid(cmd string) bool {
