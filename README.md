@@ -289,6 +289,7 @@ orch briefing gen            # auto-generate briefing via MLX
 | `/sessions` | List all running sessions (uptime, idle status) |
 | `/back` | Return to normal mode (session stays alive in background) |
 | `/kill [backend\|all]` | Terminate a session |
+| `/auto [on\|off]` | Toggle auto-route mode (strong keywords auto-switch sessions) |
 | Ctrl+C | Same as `/back` when in session mode |
 | `/w` | List available workflows |
 | `/w 1` | Execute workflow #1 |
@@ -329,6 +330,8 @@ claude› /kill all        # terminate everything
 ```
 
 Shorthand: `c` = claude, `k` = kiro.
+
+**Streaming Output (v0.11.1+)**: Session responses now stream in real-time as chunks arrive from the backend, instead of waiting until the backend goes idle and dumping all output at once. This dramatically improves UX for long responses.
 
 ### REPL Session Context
 
@@ -409,6 +412,44 @@ steps:
     depends_on: [gather]
 ```
 
+### Route Rules (v0.11+)
+
+Control how orch suggests and auto-switches between backends in session mode:
+
+```yaml
+route_rules:
+  cooldown: 3          # min inputs between route hints
+  auto_route: false    # set true to enable auto-switching
+  history_size: 5      # sliding window for context momentum
+  rules:
+    # Phrase rules (checked first, multi-word patterns)
+    - pattern: "terraform plan"
+      target: kiro
+      strength: 3        # 1=weak, 2=medium, 3=strong
+      type: phrase
+    - pattern: "會議記錄"
+      target: claude
+      strength: 3
+      type: phrase
+    # Keyword rules (single-word patterns)
+    - pattern: notion
+      target: claude
+      strength: 3
+      type: keyword
+    # CLI detection rules (first-word matching for Classify)
+    - pattern: kubectl
+      target: shell
+      strength: 3
+      type: cli
+    # Chat pattern rules
+    - pattern: 你好
+      target: ""
+      strength: 0
+      type: chat
+```
+
+The default config includes ~100 rules. Add your own domain-specific patterns without code changes.
+
 ## Project Structure
 
 ```
@@ -488,6 +529,16 @@ npm install -g @anthropic-ai/gemini  # or: brew install gemini
 
 ## Changelog
 
+### v0.11.1 (2026-07-12)
+
+**Streaming output, DAG visualization, dead code cleanup, and test coverage boost.**
+
+- **Wire SuggestBackend/history momentum into auto-route** — When `/auto` is enabled, ambiguous inputs now check `rt.SuggestBackend(input)` for history momentum. Conservative policy: momentum-only switches only fire if the target session already exists (no auto-spawn on momentum alone).
+- **Streaming output in session mode** — Session `Send()` now exposes a `ReadStream() <-chan string` that delivers real-time output chunks as they arrive from the backend process. The REPL prints chunks immediately instead of blocking until idle. Backward-compatible `Read()` API preserved.
+- **ASCII DAG visualization for `--dry-run`** — `printDryRun` now renders a tree-style DAG with `┌─ ├─ └─` connectors, dependency annotations (`← depends on:`), and truncated command/prompt detail lines.
+- **Remove dead code** — Deleted `cfg.Routing` field (unused `map[string][]string`), `looksLikeNaturalLanguage()`, `salvagePlan()`, and `tryMLXOnce()` from planner. Removed stale `routing:` section from `config.yaml`.
+- **Test coverage improvements** — Added 22 new test functions across `pkg/planner/` (62.9%, +35pp), `pkg/backend/` (63.3%, +32pp), and `pkg/model/` (57.9%, +15pp). New `pkg/session/stream_test.go` with 5 streaming tests.
+
 ### v0.11.0 (2026-07-12)
 
 **Unified routing package — config-driven rules, auto-route, history-aware suggestions.**
@@ -500,6 +551,7 @@ The route hint system has been fully extracted from a hardcoded 73-rule function
 - **Refactor: Route rules moved from hardcoded to config-driven** — Phrase/keyword/cli/chat rules (except the step-2 tech-keyword list noted above) now live in `config.yaml` under `route_rules.rules[]`. Each rule has `type` (phrase/keyword/cli/chat), `pattern`, `target`, and `strength`.
 - **Refactor: Removed `route_hint.go`** — All functionality consolidated into `pkg/router/`. The `RouteHinter`, `NewRouteHinter()`, `RouteHint()`, and `routeRule` types are gone. `repl.go` and `main.go` now use `router.New(cfg.RouteRules)` exclusively. Also removed `planner.NewWithRouter()`, a wrapper added in this same change that had zero callers — `planner.New()` already accepts a `*router.Router` directly.
 - **Not actually resolved: `cfg.Routing` (`map[string][]string`, yaml `routing`)** — This field was named alongside `route_hint.go` in the v0.10.1 "not changed" note below as part of the same duplication concern. It is unrelated to this refactor's scope and remains completely unused by any production code path (confirmed via `git grep` against the pre-refactor commit) — this change even adds a `config_test.go` assertion on its default population, which pins the dead field down further rather than removing it. `KeywordShortcuts` (the other field named in that note) turned out to serve a distinct purpose — a shell-command category shortcut in `planner.tryKeywordPlan()`, unrelated to backend routing — so it was correctly left alone. Left `cfg.Routing` as-is pending a decision on whether to delete it outright.
+  **Update**: `cfg.Routing` was deleted in v0.11.1.
 - **Tests: Comprehensive router coverage** — 12 test functions in `pkg/router/router_test.go` covering CLI classification (35 subtests), chat detection (27 subtests), natural language (17 subtests), cross-domain hints, cooldown, strength filtering, phrase priority, history momentum, and thread safety (220 concurrent goroutines). Additional edge-case tests in `pkg/config/config_test.go` (7 tests) and `pkg/planner/planner_test.go` (7 new tests for classifyInputType with emoji, multi-line, very short/long inputs, code snippets, and ambiguous cases).
 
 ### v0.10.1 (2026-07-10)

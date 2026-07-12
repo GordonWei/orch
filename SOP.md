@@ -13,6 +13,20 @@
 | NL task dispatch | 🍎→agent classification | `orch "check AWS billing"` |
 | Complex multi-step | ☁️ cloud planning | `orch "整理今天會議記錄到 Notion"` |
 
+### Dry-Run DAG Visualization
+
+```bash
+orch --dry-run "consolidate AWS and GCP billing"
+```
+
+Shows an ASCII tree with dependency arrows:
+```
+📋 Execution Plan (dry-run):
+   ┌─ [step_1] Query AWS billing (agent: kiro)
+   ├─ [step_2] Query GCP billing (agent: kiro)
+   └─ [step_3] Merge reports (agent: claude) ← depends on: step_1, step_2
+```
+
 ### Managing Memory
 
 ```bash
@@ -41,6 +55,7 @@ Features:
   event-bus chains run, so the result is never delayed behind a slow cloud chain. The output
   is also returned as a value, but only so the REPL can store it in session context —
   callers must not print it (doing so is exactly the double-output bug this replaced).
+  Note: In **session mode** (v0.11.1+), output is handled differently — `ReadStream()` delivers chunks in real-time directly to the terminal, bypassing `runTask` entirely.
 
 ### Session Mode (v0.9+)
 
@@ -65,10 +80,14 @@ claude› terraform plan for litellm-gke
 💡 "terraform" → might be better in kiro (/switch kiro)
 ```
 
-- 73 keyword/phrase rules, 3-tier confidence (strong/medium/weak)
+- Config-driven rules (~100 default phrase/keyword patterns in `route_rules.rules[]`)
+- 3-tier confidence: strong (3), medium (2), weak (1)
 - Only medium+ signals trigger suggestions
-- Cooldown: 3 inputs between hints (no nagging)
-- Same-domain keywords are ignored (e.g., "notion" in claude won't trigger)
+- Cooldown: configurable (default 3 inputs between hints)
+- Same-domain keywords are ignored
+- `/auto [on|off]`: toggle auto-switching (strong signals auto-switch when enabled)
+
+**Streaming Output (v0.11.1+)**: Session responses stream in real-time (no more blocking until idle). If output appears truncated during `Ctrl+C` shutdown, this is expected behavior — the stream channel closes as part of graceful teardown.
 
 **Session Health (v0.10+)**:
 - `WatchSessions()` monitors session health in background (2s interval)

@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/gordonwei/orch/pkg/backend"
 	"github.com/gordonwei/orch/pkg/config"
+	"github.com/gordonwei/orch/pkg/registry"
 )
 
 // test helper
@@ -495,4 +497,451 @@ func TestClassifyInputType_Ambiguous(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// New Coverage Tests: keyword plan, fixPlan, truncateRepetition, extractJSON, fixJSON, parseClassification, looksInvalid
+// ══════════════════════════════════════════════════════════════════════════════
+
+// TestTryKeywordPlan_CLIDetection verifies that known CLI commands route to agent="shell"
+// via GeneratePlan (which calls tryKeywordPlan as Layer 1 — no MLX/cloud needed).
+func TestTryKeywordPlan_CLIDetection(t *testing.T) {
+	p := newTestPlanner(t)
+
+	cases := []struct {
+		input    string
+		category string
+	}{
+		{"kubectl get pods -n default", "infra"},
+		{"k get pods", "infra"},
+		{"terraform plan", "infra"},
+		{"tf apply", "infra"},
+		{"helm install nginx bitnami/nginx", "deploy"},
+		{"docker ps -a", "infra"},
+		{"docker-compose up -d", "infra"},
+		{"git status", "code"},
+		{"git log --oneline -5", "code"},
+		{"ls -la", "query"},
+		{"cat /etc/hosts", "query"},
+		{"grep -r TODO .", "query"},
+		{"find . -name '*.go'", "query"},
+		{"aws s3 ls", "query"},
+		{"gcloud compute instances list", "query"},
+		{"curl -s http://localhost:8080/health", "query"},
+		{"ssh user@host", "infra"},
+		{"brew install jq", "infra"},
+		{"go test ./...", "code"},
+		{"npm install express", "code"},
+		{"make build", "code"},
+		{"ping 8.8.8.8", "query"},
+		{"whoami", "query"},
+		{"date", "query"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			plan, err := p.GeneratePlan(tc.input)
+			if err != nil {
+				t.Fatalf("GeneratePlan(%q) error: %v", tc.input, err)
+			}
+			if plan == nil {
+				t.Fatalf("GeneratePlan(%q) returned nil plan", tc.input)
+			}
+			if len(plan.Steps) == 0 {
+				t.Fatalf("GeneratePlan(%q) returned no steps", tc.input)
+			}
+			if plan.Steps[0].Agent != "shell" {
+				t.Errorf("GeneratePlan(%q): agent=%q, want 'shell'", tc.input, plan.Steps[0].Agent)
+			}
+			if plan.Category != tc.category {
+				t.Errorf("GeneratePlan(%q): category=%q, want %q", tc.input, plan.Category, tc.category)
+			}
+			if plan.Steps[0].Command != tc.input {
+				t.Errorf("GeneratePlan(%q): command=%q, want %q", tc.input, plan.Steps[0].Command, tc.input)
+			}
+		})
+	}
+}
+
+// TestTryKeywordPlan_ChatDetection verifies that greetings return plan with agent="local", category="chat"
+func TestTryKeywordPlan_ChatDetection(t *testing.T) {
+	p := newTestPlanner(t)
+
+	cases := []string{
+		"你好",
+		"嗨",
+		"hello",
+		"謝謝",
+		"再見",
+		"hi",
+	}
+
+	for _, input := range cases {
+		t.Run(input, func(t *testing.T) {
+			plan, err := p.GeneratePlan(input)
+			if err != nil {
+				t.Fatalf("GeneratePlan(%q) error: %v", input, err)
+			}
+			if plan == nil {
+				t.Fatalf("GeneratePlan(%q) returned nil", input)
+			}
+			if plan.Category != "chat" {
+				t.Errorf("GeneratePlan(%q): category=%q, want 'chat'", input, plan.Category)
+			}
+			if len(plan.Steps) == 0 || plan.Steps[0].Agent != "local" {
+				t.Errorf("GeneratePlan(%q): agent=%q, want 'local'", input, plan.Steps[0].Agent)
+			}
+		})
+	}
+}
+
+// TestTryKeywordPlan_NoMatch verifies random English sentences return nil from keyword matching
+// (they would need MLX/cloud to classify, so GeneratePlan will proceed to Layer 2/3).
+// We test via the private method indirectly: if MLX is not running, GeneratePlan falls to cloud,
+// so we just verify the plan doesn't get keyword-matched by checking it's NOT category "chat" and agent != "shell".
+func TestTryKeywordPlan_NoMatch(t *testing.T) {
+	p := &Planner{cfg: &config.Config{}}
+
+	cases := []string{
+		"explain the difference between microservices and monolith",
+		"write a Python script to parse CSV files",
+		"how does garbage collection work in Go",
+		"analyze the performance of our API endpoints",
+		"what is the capital of France",
+	}
+
+	for _, input := range cases {
+		t.Run(input, func(t *testing.T) {
+			plan := p.tryKeywordPlan(input)
+			if plan != nil {
+				t.Errorf("tryKeywordPlan(%q) should return nil (no keyword match), got agent=%q category=%q",
+					input, plan.Steps[0].Agent, plan.Category)
+			}
+		})
+	}
+}
+
+// TestFixPlan_ShellToCloud verifies that when agent="shell" but the command is natural language,
+// fixPlan reroutes to "claude".
+func TestFixPlan_ShellToCloud(t *testing.T) {
+	p := newTestPlanner(t)
+
+	plan := &Plan{
+		TaskSummary: "help me check cluster health",
+		Difficulty:  "simple",
+		Category:    "infra",
+		Steps: []Step{
+			{
+				ID:          "step_1",
+				Description: "check cluster health",
+				Agent:       "shell",
+				Command:     "check the health of my kubernetes cluster",
+			},
+		},
+	}
+
+	fixed := p.fixPlan(plan, "help me check cluster health")
+	if fixed.Steps[0].Agent == "shell" {
+		t.Errorf("fixPlan should reroute natural language command from shell to cloud, got agent=%q", fixed.Steps[0].Agent)
+	}
+	if fixed.Steps[0].Command != "" {
+		t.Errorf("fixPlan should clear command when rerouting, got command=%q", fixed.Steps[0].Command)
+	}
+	if fixed.Steps[0].Prompt == "" {
+		t.Error("fixPlan should set prompt when rerouting")
+	}
+}
+
+// TestFixPlan_InvalidCommand verifies that commands with placeholders get rerouted.
+func TestFixPlan_InvalidCommand(t *testing.T) {
+	p := newTestPlanner(t)
+
+	cases := []struct {
+		name    string
+		command string
+	}{
+		{"angle_bracket_region", "aws ec2 describe-instances --region <region>"},
+		{"your_prefix", "kubectl get pods -n your-namespace"},
+		{"placeholder_project", "gcloud compute instances list --project <project>"},
+		{"ellipsis", "terraform plan -var 'name=...'"},
+		{"parentheses", "docker run (image name here)"},
+		{"example_domain", "curl https://example.com/api"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			plan := &Plan{
+				TaskSummary: "deploy",
+				Difficulty:  "simple",
+				Category:    "infra",
+				Steps: []Step{
+					{
+						ID:      "step_1",
+						Agent:   "shell",
+						Command: tc.command,
+					},
+				},
+			}
+
+			fixed := p.fixPlan(plan, "deploy the application")
+			if fixed.Steps[0].Agent == "shell" {
+				t.Errorf("fixPlan should reroute invalid command %q, but agent is still 'shell'", tc.command)
+			}
+		})
+	}
+}
+
+// TestFixPlan_SchemaJunk verifies that plans with task_summary="one line" get converted to chat.
+func TestFixPlan_SchemaJunk(t *testing.T) {
+	p := newTestPlanner(t)
+
+	junkSummaries := []string{"one line", "what to do", "task description", "one line summary"}
+	for _, junk := range junkSummaries {
+		t.Run(junk, func(t *testing.T) {
+			plan := &Plan{
+				TaskSummary: junk,
+				Difficulty:  "simple",
+				Category:    "infra",
+				Steps: []Step{
+					{
+						ID:    "step_1",
+						Agent: "kiro",
+					},
+				},
+			}
+
+			fixed := p.fixPlan(plan, "what is kubernetes")
+			if fixed.Category != "chat" {
+				t.Errorf("fixPlan should convert schema junk %q to chat, got category=%q", junk, fixed.Category)
+			}
+			if fixed.Steps[0].Agent != "local" {
+				t.Errorf("fixPlan should set agent=local for schema junk, got %q", fixed.Steps[0].Agent)
+			}
+		})
+	}
+}
+
+// TestTruncateRepetition tests the repetition truncation logic.
+func TestTruncateRepetition(t *testing.T) {
+	cases := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			"no_repetition",
+			"This is a normal sentence without any issues.",
+			"This is a normal sentence without any issues.",
+		},
+		{
+			"single_word_repeat",
+			"Hello world world world world world world",
+			"Hello",
+		},
+		{
+			"phrase_repeat_3x",
+			"The answer is yes. The answer is yes. The answer is yes. The answer is yes.",
+			"The answer is yes.",
+		},
+		{
+			"short_input",
+			"hi there",
+			"hi there",
+		},
+		{
+			"empty",
+			"",
+			"",
+		},
+		{
+			"repetition_at_start",
+			"ok ok ok ok ok more text",
+			"ok ok ok ok ok more text", // cutAt=0 fails the > 0 check; ngram doesn't hit 3x either
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := truncateRepetition(tc.input)
+			if result != tc.expected {
+				t.Errorf("truncateRepetition(%q) = %q, want %q", tc.input, result, tc.expected)
+			}
+		})
+	}
+}
+
+// TestExtractJSON tests JSON extraction from various formats.
+func TestExtractJSON_VariousFormats(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		valid bool // whether extracted string is valid JSON
+	}{
+		{
+			"bare_json",
+			`{"task_summary":"test","steps":[]}`,
+			true,
+		},
+		{
+			"markdown_json_block",
+			"Here is the plan:\n```json\n{\"task_summary\":\"test\",\"steps\":[]}\n```\nDone!",
+			true,
+		},
+		{
+			"markdown_no_lang_block",
+			"```\n{\"task_summary\":\"test\",\"steps\":[]}\n```",
+			true,
+		},
+		{
+			"garbage_wrapped",
+			"Sure! I'll help you.\n\nThe plan is: {\"task_summary\":\"deploy\",\"steps\":[]} Hope this helps!",
+			true,
+		},
+		{
+			"nested_json",
+			`{"task_summary":"test","steps":[{"id":"step_1","agent":"shell","command":"ls"}]}`,
+			true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := extractJSON(tc.input)
+			if tc.valid {
+				var js json.RawMessage
+				if err := json.Unmarshal([]byte(result), &js); err != nil {
+					t.Errorf("extractJSON(%q) produced invalid JSON: %v\nresult: %s", tc.name, err, result)
+				}
+			}
+		})
+	}
+}
+
+// TestFixJSON tests single quotes, trailing commas, unquoted keys.
+func TestFixJSON(t *testing.T) {
+	cases := []struct {
+		name   string
+		input  string
+		valid  bool
+	}{
+		{
+			"single_quotes",
+			"{'task_summary': 'test', 'steps': []}",
+			true,
+		},
+		{
+			"trailing_comma_object",
+			`{"task_summary": "test", "steps": [],}`,
+			true,
+		},
+		{
+			"trailing_comma_array",
+			`{"steps": ["a", "b",]}`,
+			true,
+		},
+		{
+			"unquoted_keys",
+			"{\ntask_summary: \"test\",\nsteps: []\n}",
+			true,
+		},
+		{
+			"mixed_issues",
+			"{\ntask_summary: 'hello',\nsteps: [],\n}",
+			true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := fixJSON(tc.input)
+			if tc.valid {
+				var js json.RawMessage
+				if err := json.Unmarshal([]byte(result), &js); err != nil {
+					t.Errorf("fixJSON(%q) produced invalid JSON: %v\nresult: %s", tc.name, err, result)
+				}
+			}
+		})
+	}
+}
+
+// TestParseClassification tests the parseClassification function.
+func TestParseClassification(t *testing.T) {
+	cases := []struct {
+		input        string
+		wantAgent    string
+		wantCategory string
+	}{
+		{"kiro:infra", "kiro", "infra"},
+		{"claude:docs", "claude", "docs"},
+		{"shell:query", "shell", "query"},
+		{"local:chat", "local", "chat"},
+		{"gemini:docs", "gemini", "docs"},
+		{"KIRO:INFRA", "kiro", "infra"},
+		{"`kiro:infra`", "kiro", "infra"},
+		{"\"claude:docs\"", "claude", "docs"},
+		// Garbage input falls back to local:chat
+		{"garbage text no colon", "local", "chat"},
+		{"", "local", "chat"},
+		{"invalid:invalid", "local", "chat"},
+		{"kiro:invalid_cat", "kiro", "chat"},
+		{"bad_agent:infra", "local", "infra"},
+		// Multi-line (only first line matters)
+		{"shell:infra\nsome garbage", "shell", "infra"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			agent, category := parseClassification(tc.input)
+			if agent != tc.wantAgent {
+				t.Errorf("parseClassification(%q): agent=%q, want %q", tc.input, agent, tc.wantAgent)
+			}
+			if category != tc.wantCategory {
+				t.Errorf("parseClassification(%q): category=%q, want %q", tc.input, category, tc.wantCategory)
+			}
+		})
+	}
+}
+
+// TestLooksInvalid tests the looksInvalid function for detecting placeholder/garbage commands.
+func TestLooksInvalid(t *testing.T) {
+	cases := []struct {
+		input string
+		want  bool
+	}{
+		// Invalid cases (should return true)
+		{"aws ec2 describe-instances --region <region>", true},
+		{"kubectl get pods -n your-namespace", true},
+		{"gcloud compute list --project <project>", true},
+		{"terraform plan -var '...'", true},
+		{"docker run (image name)", true},
+		{"curl https://example.com/api", true},
+		{"kubectl apply -f <your-file>.yaml", true},
+		{"ssh user@placeholder-host", true},
+		// Valid cases (should return false)
+		{"kubectl get pods -n kube-system", false},
+		{"aws s3 ls", false},
+		{"terraform plan -out=plan.tf", false},
+		{"docker ps -a", false},
+		{"git status", false},
+		{"ls -la /tmp", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.input, func(t *testing.T) {
+			got := looksInvalid(tc.input)
+			if got != tc.want {
+				t.Errorf("looksInvalid(%q) = %v, want %v", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// newTestPlanner creates a Planner instance for testing with minimal dependencies.
+func newTestPlanner(t *testing.T) *Planner {
+	t.Helper()
+	cfg := config.Load()
+	reg := registry.Scan()
+	br := backend.NewRegistry("")
+	p := New(reg, cfg, br, nil)
+	return p
 }

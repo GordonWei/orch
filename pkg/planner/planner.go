@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"regexp"
 	"strings"
 
 	"github.com/gordonwei/orch/pkg/backend"
@@ -403,113 +402,6 @@ func parseClassification(raw string) (agent string, category string) {
 	return agent, category
 }
 
-// salvagePlan extracts a usable plan from malformed JSON using regex.
-// This is the last resort when the small model produces unparseable JSON.
-var (
-	reAgent    = regexp.MustCompile(`"agent"\s*:\s*"([^"]+)"`)
-	reCategory = regexp.MustCompile(`"category"\s*:\s*"([^"]+)"`)
-	rePrompt   = regexp.MustCompile(`"prompt"\s*:\s*"([^"]*)"`)
-	reCommand  = regexp.MustCompile(`"command"\s*:\s*"([^"]*)"`)
-)
-
-func salvagePlan(raw string, userInput string) *Plan {
-	// Extract agent
-	agent := "local"
-	if m := reAgent.FindStringSubmatch(raw); len(m) > 1 {
-		agent = m[1]
-	}
-
-	// Extract category
-	category := "chat"
-	if m := reCategory.FindStringSubmatch(raw); len(m) > 1 {
-		category = m[1]
-	}
-
-	// Extract prompt
-	prompt := userInput
-	if m := rePrompt.FindStringSubmatch(raw); len(m) > 1 && m[1] != "" {
-		prompt = m[1]
-	}
-
-	// Extract command
-	command := ""
-	if m := reCommand.FindStringSubmatch(raw); len(m) > 1 {
-		command = m[1]
-	}
-
-	// Build a valid plan from salvaged fields
-	step := Step{
-		ID:          "step_1",
-		Description: userInput,
-		Agent:       agent,
-		Prompt:      prompt,
-		Command:     command,
-	}
-
-	return &Plan{
-		TaskSummary: userInput,
-		Difficulty:  "simple",
-		Category:    category,
-		Steps:       []Step{step},
-	}
-}
-
-// tryMLXOnce makes a single MLX call with the given temperature and parses the result.
-func (p *Planner) tryMLXOnce(userInput string, systemPrompt string, temp float64) (*Plan, error) {
-	reqBody := map[string]interface{}{
-		"model": p.mlxModel,
-		"messages": []map[string]string{
-			{"role": "system", "content": systemPrompt},
-			{"role": "user", "content": userInput},
-		},
-		"max_tokens":              1024,
-		"temperature":             temp,
-		"repetition_penalty":      1.3,
-		"repetition_context_size": 128,
-	}
-
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := http.Post(p.mlxEndpoint+"/v1/chat/completions", "application/json", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
-	}
-
-	if len(result.Choices) == 0 {
-		return nil, fmt.Errorf("no choices in retry")
-	}
-
-	raw := extractJSON(result.Choices[0].Message.Content)
-
-	var plan Plan
-	if err := json.Unmarshal([]byte(raw), &plan); err != nil {
-		return nil, fmt.Errorf("retry parse failed: %w", err)
-	}
-
-	if len(plan.Steps) == 0 {
-		return nil, fmt.Errorf("retry returned no steps")
-	}
-
-	plan = *p.fixPlan(&plan, userInput)
-	return &plan, nil
-}
-
 // ===== Plan Post-Processing =====
 
 // fixPlan fixes common mistakes from small models:
@@ -579,11 +471,6 @@ func (p *Planner) fixPlan(plan *Plan, userInput string) *Plan {
 	}
 
 	return plan
-}
-
-// looksLikeNaturalLanguage checks whether input is natural language (not a direct CLI command).
-func looksLikeNaturalLanguage(input string) bool {
-	return classifyInputType(input) == inputTypeNaturalLanguage
 }
 
 // inputType represents the classification of user input.

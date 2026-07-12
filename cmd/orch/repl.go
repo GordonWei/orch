@@ -160,6 +160,17 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br
 						fmt.Fprintf(os.Stderr, "⚠️  session not available after auto-route\n")
 						continue
 					}
+				} else if rt.AutoRoute() {
+					// Secondary: context-aware history momentum
+					if suggested, kw := rt.SuggestBackend(input); suggested != "" && suggested != sm.ActiveBackend() && kw == "(history momentum)" {
+						// Only auto-switch on pure momentum if target session already exists (don't spawn)
+						if sm.Get(suggested) != nil {
+							if err := sm.Switch(suggested); err == nil {
+								fmt.Fprintf(os.Stderr, "🔀 auto-routed to %s (context momentum)\n", suggested)
+								sess = sm.Active()
+							}
+						}
+					}
 				}
 			}
 
@@ -171,16 +182,19 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br
 				continue
 			}
 
-			// Read response (blocks until idle)
-			output, err := sess.Read()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "❌ read failed: %v\n", err)
-				continue
+			// Stream response chunks as they arrive (real-time output)
+			stream := sess.ReadStream()
+			gotOutput := false
+			for chunk := range stream {
+				if chunk != "" {
+					fmt.Print(chunk)
+					gotOutput = true
+				}
 			}
-
-			if output != "" {
-				fmt.Print(output)
-				if !strings.HasSuffix(output, "\n") {
+			if gotOutput {
+				// Ensure trailing newline
+				raw := sess.ReadRaw()
+				if raw != "" && !strings.HasSuffix(raw, "\n") {
 					fmt.Println()
 				}
 				sm.TouchOutput(sm.ActiveBackend())

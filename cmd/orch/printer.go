@@ -101,60 +101,66 @@ func printHistoryEntries(entries []memory.HistoryEntry) {
 // ===== Dry Run Printer =====
 
 func printDryRun(plan *planner.Plan) {
-	fmt.Println("📋 Dry Run — Plan Preview")
-	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━")
-	fmt.Println()
-	fmt.Printf("Task: %s\n", plan.TaskSummary)
-	fmt.Printf("Difficulty: %s | Category: %s | Steps: %d\n", plan.Difficulty, plan.Category, len(plan.Steps))
+	fmt.Println("📋 Execution Plan (dry-run):")
+	fmt.Printf("   Task: %s\n", plan.TaskSummary)
+	fmt.Printf("   Difficulty: %s | Category: %s | Steps: %d\n", plan.Difficulty, plan.Category, len(plan.Steps))
 	fmt.Println()
 
-	// Render DAG
-	dag := renderDAG(plan.Steps)
-	fmt.Println("┌─────────────────────────────────────────┐")
-	fmt.Println("│ DAG Execution Graph                      │")
-	fmt.Println("├─────────────────────────────────────────┤")
-	fmt.Println("│                                          │")
-	for _, line := range strings.Split(dag, "\n") {
-		if line == "" {
-			continue
-		}
-		padded := line
-		runeLen := len([]rune(padded))
-		if runeLen < 40 {
-			padded = padded + strings.Repeat(" ", 40-runeLen)
-		}
-		fmt.Printf("│  %s│\n", padded)
+	if len(plan.Steps) == 0 {
+		fmt.Println("   (no steps)")
+		return
 	}
-	fmt.Println("│                                          │")
-	fmt.Println("└─────────────────────────────────────────┘")
-	fmt.Println()
 
-	// Step details
-	fmt.Println("Steps:")
+	// Single step: simple format, no tree lines
+	if len(plan.Steps) == 1 {
+		step := plan.Steps[0]
+		fmt.Printf("   ── [%s] %s (agent: %s)\n", step.ID, step.Description, step.Agent)
+		detail := stepDetail(step)
+		if detail != "" {
+			fmt.Printf("         └─ %s\n", detail)
+		}
+		return
+	}
+
+	// Multiple steps: DAG tree visualization
 	for i, step := range plan.Steps {
-		fmt.Printf("  %d. [%s] %s\n", i+1, step.ID, step.Description)
-
-		if step.Command != "" {
-			fmt.Printf("     agent: %s | command: %s\n", step.Agent, step.Command)
-		} else if step.Prompt != "" {
-			promptPreview := truncateStr(step.Prompt, 50)
-			fmt.Printf("     agent: %s | prompt: %s\n", step.Agent, promptPreview)
+		// Choose tree connector
+		var connector string
+		var childPrefix string
+		if i == 0 {
+			connector = "┌─"
+			childPrefix = "│"
+		} else if i == len(plan.Steps)-1 {
+			connector = "└─"
+			childPrefix = " "
 		} else {
-			fmt.Printf("     agent: %s\n", step.Agent)
+			connector = "├─"
+			childPrefix = "│"
 		}
 
-		deps := "(none)"
+		// Build the step header line
+		header := fmt.Sprintf("[%s] %s (agent: %s)", step.ID, step.Description, step.Agent)
 		if len(step.DependsOn) > 0 {
-			deps = strings.Join(step.DependsOn, ", ")
+			header += " ← depends on: " + strings.Join(step.DependsOn, ", ")
 		}
-		onFailure := step.OnFailure
-		if onFailure == "" {
-			onFailure = "fail"
-		}
-		fmt.Printf("     depends_on: %s | on_failure: %s\n", deps, onFailure)
 
-		if i < len(plan.Steps)-1 {
-			fmt.Println()
+		fmt.Printf("   %s %s\n", connector, header)
+
+		// Show command or prompt detail
+		detail := stepDetail(step)
+		if detail != "" {
+			fmt.Printf("   %s     └─ %s\n", childPrefix, detail)
 		}
 	}
+}
+
+// stepDetail returns a truncated "command: ..." or "prompt: ..." string for a step.
+func stepDetail(step planner.Step) string {
+	if step.Command != "" {
+		return "command: " + truncateStr(step.Command, 80)
+	}
+	if step.Prompt != "" {
+		return "prompt: " + truncateStr(step.Prompt, 80)
+	}
+	return ""
 }

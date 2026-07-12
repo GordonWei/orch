@@ -32,7 +32,6 @@ type Config struct {
 	Memory           MemoryConfig        `yaml:"memory"`
 	Workflows        WorkflowConfig      `yaml:"workflows"`
 	Workspace        Workspace           `yaml:"workspace"`
-	Routing          map[string][]string `yaml:"routing"`
 	KeywordShortcuts []KeywordShortcut   `yaml:"keyword_shortcuts"`
 	RouteRules       RouteRulesConfig    `yaml:"route_rules"`
 }
@@ -205,11 +204,6 @@ Response rules:
 		Workspace: Workspace{
 			Root:    "",
 			Subdirs: []Subdir{},
-		},
-		Routing: map[string][]string{
-			"kiro":   {"code", "infra", "aws", "gcp", "terraform", "deploy", "build", "test", "file-ops", "shell"},
-			"claude": {"notion", "gcal", "gmail", "google-workspace", "writing", "analysis", "meeting-notes"},
-			"gemini": {"long-context", "video", "image", "summarization", "google-drive"},
 		},
 		KeywordShortcuts: []KeywordShortcut{
 			{Prefix: "kubectl", Category: "infra"},

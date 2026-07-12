@@ -43,15 +43,16 @@ func DefaultConfig(backend Backend) Config {
 
 // Session is a live PTY-backed interactive session with an AI CLI.
 type Session struct {
-	cfg     Config
-	cmd     *exec.Cmd
-	ptmx    *os.File
-	idle    *IdleDetector
-	output  strings.Builder
-	mu      sync.Mutex
-	done    chan struct{}
-	started bool
-	exited  bool
+	cfg      Config
+	cmd      *exec.Cmd
+	ptmx     *os.File
+	idle     *IdleDetector
+	output   strings.Builder
+	mu       sync.Mutex
+	done     chan struct{}
+	started  bool
+	exited   bool
+	streamCh chan string // current streaming channel; nil when not active
 }
 
 // Spawn creates and starts a new interactive session.
@@ -111,6 +112,16 @@ func Spawn(cfg Config) (*Session, error) {
 		done: make(chan struct{}),
 	}
 
+	// Register idle callback to close the stream channel when backend goes idle
+	s.idle.onIdleFunc = func() {
+		s.mu.Lock()
+		if s.streamCh != nil {
+			close(s.streamCh)
+			s.streamCh = nil
+		}
+		s.mu.Unlock()
+	}
+
 	// Start reading output in background
 	go s.readLoop()
 	s.started = true
@@ -127,28 +138,58 @@ func (s *Session) Send(input string) error {
 		return fmt.Errorf("session already exited")
 	}
 
+	// Close old stream channel if still open
+	if s.streamCh != nil {
+		close(s.streamCh)
+		s.streamCh = nil
+	}
+
 	// Reset idle detector and clear output buffer before sending
 	s.idle.Reset()
 	s.output.Reset()
+
+	// Create a new stream channel for this send/read cycle
+	s.streamCh = make(chan string, 64)
 
 	_, err := s.ptmx.Write([]byte(input + "\r"))
 	return err
 }
 
+// ReadStream returns a channel that emits output chunks as they arrive.
+// The channel is closed when the backend becomes idle or the session exits.
+// Each chunk is already ANSI-stripped.
+func (s *Session) ReadStream() <-chan string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.streamCh == nil {
+		// No active stream; return a closed channel so callers don't block.
+		ch := make(chan string)
+		close(ch)
+		return ch
+	}
+	return s.streamCh
+}
+
 // Read returns all buffered output since the last Send, blocking until idle.
 // It waits for the backend to become idle (stdout silent for IdleTime).
 func (s *Session) Read() (string, error) {
-	// Wait for idle or session exit
-	select {
-	case <-s.idle.Wait():
-	case <-s.done:
+	// Drain the stream channel to collect all output
+	ch := s.ReadStream()
+	var buf strings.Builder
+	for chunk := range ch {
+		buf.WriteString(chunk)
 	}
 
+	// Also include anything remaining in the output buffer (from before
+	// streamCh existed or edge-case timing)
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	remaining := s.output.String()
+	s.mu.Unlock()
 
-	result := s.output.String()
-	return result, nil
+	if remaining != "" && buf.Len() == 0 {
+		return remaining, nil
+	}
+	return buf.String(), nil
 }
 
 // ReadRaw returns whatever is currently in the output buffer without waiting.
@@ -216,6 +257,11 @@ func (s *Session) readLoop() {
 	defer func() {
 		s.mu.Lock()
 		s.exited = true
+		// Close the stream channel on exit so readers unblock
+		if s.streamCh != nil {
+			close(s.streamCh)
+			s.streamCh = nil
+		}
 		s.mu.Unlock()
 		close(s.done)
 	}()
@@ -229,6 +275,14 @@ func (s *Session) readLoop() {
 			if strings.TrimSpace(cleaned) != "" {
 				s.mu.Lock()
 				s.output.WriteString(cleaned)
+				// Non-blocking send to stream channel
+				if s.streamCh != nil {
+					select {
+					case s.streamCh <- cleaned:
+					default:
+						// Channel full, drop chunk to avoid blocking readLoop
+					}
+				}
 				s.mu.Unlock()
 			}
 			// Any PTY activity resets the idle timer, even when the cleaned

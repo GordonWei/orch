@@ -79,12 +79,12 @@ workflows:
 #       keywords: [terraform, kubernetes, aws, gcp]
 
 # === Agent Routing ===
-# Maps categories to preferred AI backend.
-# Used by the planner to suggest which agent handles which task type.
-routing:
-  kiro: [code, infra, aws, gcp, terraform, deploy, build, test, file-ops, shell]
-  claude: [notion, gcal, gmail, google-workspace, writing, analysis, meeting-notes]
-  gemini: [long-context, video, image, summarization, google-drive]
+# [Removed in v0.11.1] The routing: map has been replaced by route_rules below.
+# Routing decisions are now driven entirely by route_rules with keyword/phrase matching.
+# routing:
+#   kiro: [code, infra, aws, gcp, terraform, deploy, build, test, file-ops, shell]
+#   claude: [notion, gcal, gmail, google-workspace, writing, analysis, meeting-notes]
+#   gemini: [long-context, video, image, summarization, google-drive]
 
 # === Keyword Shortcuts ===
 # Commands matching these prefixes bypass AI planning entirely (Layer 1).

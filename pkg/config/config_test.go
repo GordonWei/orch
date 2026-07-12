@@ -52,17 +52,6 @@ func TestLoad_DefaultConfig(t *testing.T) {
 		t.Error("Memory.BriefingOnBoot should default to true")
 	}
 
-	// Verify routing map exists
-	if len(cfg.Routing) == 0 {
-		t.Error("Routing map should not be empty")
-	}
-	if _, ok := cfg.Routing["kiro"]; !ok {
-		t.Error("Routing should contain 'kiro' entry")
-	}
-	if _, ok := cfg.Routing["claude"]; !ok {
-		t.Error("Routing should contain 'claude' entry")
-	}
-
 	// Verify keyword shortcuts
 	if len(cfg.KeywordShortcuts) == 0 {
 		t.Error("KeywordShortcuts should not be empty")

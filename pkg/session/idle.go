@@ -8,12 +8,13 @@ import (
 // IdleDetector monitors output activity and determines when a backend
 // has finished producing output (stdout silent for a configured duration).
 type IdleDetector struct {
-	timeout  time.Duration
-	mu       sync.Mutex
-	lastPing time.Time
-	timer    *time.Timer
-	idleCh   chan struct{}
-	fired    bool
+	timeout    time.Duration
+	mu         sync.Mutex
+	lastPing   time.Time
+	timer      *time.Timer
+	idleCh     chan struct{}
+	fired      bool
+	onIdleFunc func() // optional callback invoked when idle fires (called under mu)
 }
 
 // NewIdleDetector creates an idle detector with the given timeout.
@@ -78,11 +79,19 @@ func (d *IdleDetector) SilentFor() time.Duration {
 
 func (d *IdleDetector) onIdle() {
 	d.mu.Lock()
-	defer d.mu.Unlock()
 
 	if d.fired {
+		d.mu.Unlock()
 		return
 	}
 	d.fired = true
 	close(d.idleCh)
+	fn := d.onIdleFunc
+	d.mu.Unlock()
+
+	// Call outside the lock to avoid deadlocks with callers that hold
+	// other locks (e.g. Session.mu) when calling IdleDetector methods.
+	if fn != nil {
+		fn()
+	}
 }
