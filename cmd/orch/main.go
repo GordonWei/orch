@@ -20,6 +20,7 @@ import (
 	"github.com/gordonwei/orch/pkg/planner"
 	"github.com/gordonwei/orch/pkg/registry"
 	"github.com/gordonwei/orch/pkg/router"
+	"github.com/gordonwei/orch/pkg/workflow"
 )
 
 // version is set at build time via -ldflags "-X main.version=v0.4"
@@ -402,6 +403,80 @@ Output only the briefing text, no titles or formatting.`, sb.String())
 // ===== Task Execution =====
 
 func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry, bus *eventbus.Bus, prompt string, dryRun bool) (bool, string) {
+	// 0. Workflow trigger match — check before AI planning
+	if workflows, err := workflow.LoadAll(cfg.Workflows.Dir); err == nil && len(workflows) > 0 {
+		if matched := workflow.Match(prompt, workflows); matched != nil {
+			fmt.Fprintf(os.Stderr, "📋 workflow matched: %s\n", matched.Name)
+			plan := workflow.ToPlanner(matched, nil, cfg)
+
+			if dryRun {
+				fmt.Fprintf(os.Stderr, "📝 %s\n", plan.TaskSummary)
+				fmt.Fprintf(os.Stderr, "   difficulty: %s | category: %s | steps: %d\n",
+					plan.Difficulty, plan.Category, len(plan.Steps))
+				fmt.Fprintf(os.Stderr, "\n")
+				printDryRun(plan)
+				return true, ""
+			}
+
+			fmt.Fprintf(os.Stderr, "🚀 executing workflow: %s (%d steps)\n", matched.Name, len(plan.Steps))
+
+			stepEvents := make(chan executor.StepEvent, 64)
+			stepPrinterWg := startEventPrinter(stepEvents)
+			outputEvents := make(chan executor.OutputEvent, 256)
+			outputPrinterWg := startOutputPrinter(outputEvents)
+
+			e := executor.New(cfg, br)
+			e.EventChan = stepEvents
+			e.OutputEvents = outputEvents
+			result := e.Execute(plan)
+
+			stepPrinterWg.Wait()
+			close(outputEvents)
+			outputPrinterWg.Wait()
+
+			fmt.Fprintf(os.Stderr, "\n")
+			if result.Success {
+				fmt.Fprintf(os.Stderr, "🏁 workflow complete (%s)\n", result.Took.Round(100*time.Millisecond))
+				if len(result.Steps) > 0 {
+					last := result.Steps[len(result.Steps)-1]
+					if last.Output != "" {
+						fmt.Print(last.Output)
+					}
+				}
+			} else {
+				fmt.Fprintf(os.Stderr, "💀 workflow failed after %s\n", result.Took.Round(100*time.Millisecond))
+				if result.Err != nil {
+					fmt.Fprintf(os.Stderr, "   error: %v\n", result.Err)
+				}
+			}
+
+			if store != nil {
+				var outputSummary string
+				if len(result.Steps) > 0 {
+					outputSummary = truncateStr(result.Steps[len(result.Steps)-1].Output, 500)
+				}
+				store.AddHistory(memory.HistoryEntry{
+					Input:         prompt,
+					Category:      "workflow",
+					Agent:         "workflow",
+					OutputSummary: outputSummary,
+					Success:       result.Success,
+					Tags:          []string{"workflow", matched.Name},
+					TookMs:        result.Took.Milliseconds(),
+				})
+			}
+
+			if !result.Success {
+				return false, ""
+			}
+			var finalOutput string
+			if len(result.Steps) > 0 {
+				finalOutput = result.Steps[len(result.Steps)-1].Output
+			}
+			return true, finalOutput
+		}
+	}
+
 	// 1. Plan
 	fmt.Fprintf(os.Stderr, "🧠 planning...\n")
 	r := router.New(cfg.RouteRules)

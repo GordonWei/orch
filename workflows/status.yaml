@@ -1,0 +1,19 @@
+# 快速狀態檢查 — 看各子專案最新狀態
+# 觸發：orch "status"（trigger 目前只支援單一詞，"狀態" 不會觸發，見 workflow.Workflow.Trigger）
+# 注意：trigger 是純 ASCII，Match() 會做 word-boundary 檢查（不會誤觸發於 "statusbar"/"gitstatus"
+# 這類複合字，但仍會匹配任何含有獨立單字 "status" 的較長句子，例如 "check cluster status"）
+name: "status"
+trigger: "status"
+description: "快速顯示各子專案現況和待辦"
+steps:
+  - id: check
+    agent: shell
+    command: |
+      echo "📊 Cowork 子專案狀態" && echo "" && \
+      for dir in AWS GCP OnPremise momo Salesforce Study; do \
+        if [ -f "$dir/docs/_agent_handoff.md" ]; then \
+          echo "━━━ $dir ━━━" && \
+          head -20 "$dir/docs/_agent_handoff.md" | grep -E "更新時間|狀態|摘要" | head -3 && \
+          echo ""; \
+        fi; \
+      done

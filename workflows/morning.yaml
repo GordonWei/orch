@@ -1,0 +1,18 @@
+# 開工流程 — 讀取交接表，回報待辦與建議
+# 觸發：orch "開工"（trigger 目前只支援單一詞，"早安"/"上線" 不會觸發，見 workflow.Workflow.Trigger）
+name: "morning"
+trigger: "開工"
+description: "讀取三層交接表，回報待辦清單與今日建議"
+steps:
+  - id: read_handoff
+    agent: kiro
+    prompt: |
+      讀取以下交接檔案，回報目前狀態快照：
+      1. docs/_agent_handoff.md（全局儀表板）
+      2. 各子專案有標記 🔴 的待辦事項
+
+      輸出格式：
+      📋 今日快照
+      - 待辦：[列出所有 🔴 項目]
+      - 進行中：[列出 WIP 項目]
+      - 建議優先處理：[依急迫度排序前 3 項]

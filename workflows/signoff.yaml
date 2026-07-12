@@ -1,0 +1,32 @@
+# 收工流程 — 更新交接表，同步 Notion
+# 觸發：orch "收工"（trigger 目前只支援單一詞，"下班"/"晚安" 不會觸發，見 workflow.Workflow.Trigger）
+name: "signoff"
+trigger: "收工"
+description: "整理今日產出，更新本地交接表，交給 Victoria 同步 Notion"
+steps:
+  - id: gather
+    agent: kiro
+    prompt: |
+      讀取 docs/_agent_handoff.md，列出今天（{{.date}}）的變更紀錄。
+      再掃描各子專案 docs/_agent_handoff.md 中今日更新的部分。
+
+      輸出格式：
+      📝 今日完成項目：
+      - [項目1]（子專案/路徑）
+      - [項目2]
+
+      🔴 未完成/待辦：
+      - [項目]（進度說明）
+
+  - id: sync_notion
+    agent: claude
+    prompt: |
+      將以下今日收工摘要同步到 Notion 全局交接看板（ID：374359fc-154e-81e0-8982-d16818d8470b）：
+
+      {{.gather.output}}
+
+      規則：
+      1. 更新最後活躍時間和狀態
+      2. 如有新的 🔴 待辦，加入待確認事項
+      3. 保持 Notion 格式與既有內容一致
+    depends_on: [gather]

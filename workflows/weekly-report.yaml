@@ -1,0 +1,30 @@
+# 週報生成 — 從 history + handoff 生成週報草稿
+# 觸發：orch "週報"（trigger 目前只支援單一詞，"weekly" 不會觸發，見 workflow.Workflow.Trigger）
+name: "weekly-report"
+trigger: "週報"
+description: "彙整本週完成項目，生成週報草稿"
+steps:
+  - id: collect_history
+    agent: shell
+    command: |
+      echo "=== orch history (本週) ===" && \
+      sqlite3 ~/.config/orch/orch.db "SELECT date(timestamp) as day, category, agent, input FROM history WHERE timestamp > datetime('now', '-7 days') ORDER BY timestamp;" 2>/dev/null && \
+      echo "" && \
+      echo "=== 交接表本週紀錄 ===" && \
+      grep -A 2 "$(date -v-7d +%Y-%m)" docs/_agent_handoff.md 2>/dev/null | head -50
+
+  - id: generate_draft
+    agent: kiro
+    prompt: |
+      根據以下本週活動資料，生成 momo 基礎架構部週報草稿：
+
+      {{.collect_history.output}}
+
+      格式要求：
+      1. 本週完成事項（分類：基礎設施/文件/會議/其他）
+      2. 進行中項目（含進度百分比）
+      3. 下週重點待辦
+      4. 需主管決策事項（如有）
+
+      輸出為 Markdown 格式，存到 momo/docs/_draft_weekly.md
+    depends_on: [collect_history]

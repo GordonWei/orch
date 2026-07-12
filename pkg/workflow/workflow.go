@@ -82,6 +82,13 @@ func LoadAll(dir string) ([]Workflow, error) {
 
 // Match match workflow trigger keywords against user input
 // returns first matching workflow, returns nil if no match
+//
+// ASCII-only triggers (e.g. "status", "deploy staging") require a word
+// boundary on both sides, so a short common English word doesn't fire inside
+// an unrelated sentence (e.g. "check the GKE cluster status" or "statusbar"
+// must not match the "status" trigger). CJK triggers keep plain substring
+// matching — CJK text has no reliable word-boundary concept, and casual
+// phrasing like "我要收工了" is expected to still match the "收工" trigger.
 func Match(input string, workflows []Workflow) *Workflow {
 	inputLower := strings.ToLower(strings.TrimSpace(input))
 
@@ -91,13 +98,61 @@ func Match(input string, workflows []Workflow) *Workflow {
 			continue
 		}
 
-		// exact match or input contains trigger
-		if inputLower == triggerLower || strings.Contains(inputLower, triggerLower) {
+		if inputLower == triggerLower {
+			return &workflows[i]
+		}
+
+		if isASCIIOnly(triggerLower) {
+			if containsWholeWord(inputLower, triggerLower) {
+				return &workflows[i]
+			}
+			continue
+		}
+
+		if strings.Contains(inputLower, triggerLower) {
 			return &workflows[i]
 		}
 	}
 
 	return nil
+}
+
+// isASCIIOnly reports whether s contains only ASCII bytes.
+func isASCIIOnly(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
+// containsWholeWord reports whether needle appears in haystack with
+// non-alphanumeric (or string-boundary) characters on both sides — it still
+// matches "status" inside "check cluster status", but not inside
+// "statusbar" or "gitstatus".
+func containsWholeWord(haystack, needle string) bool {
+	start := 0
+	for {
+		idx := strings.Index(haystack[start:], needle)
+		if idx == -1 {
+			return false
+		}
+		idx += start
+
+		beforeOK := idx == 0 || !isAlnum(haystack[idx-1])
+		afterIdx := idx + len(needle)
+		afterOK := afterIdx >= len(haystack) || !isAlnum(haystack[afterIdx])
+
+		if beforeOK && afterOK {
+			return true
+		}
+		start = idx + 1
+	}
+}
+
+func isAlnum(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
 }
 
 // ToPlanner converts Workflow to planner.Plan for executor

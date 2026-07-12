@@ -156,6 +156,40 @@ func TestMatch(t *testing.T) {
 	}
 }
 
+// TestMatch_ASCIIWordBoundary guards against a regression where an ASCII-only
+// trigger (like the real "status" workflow) matched as a raw substring,
+// falsely firing inside unrelated words such as "statusbar" or "gitstatus".
+// CJK triggers are unaffected — they don't have a reliable word-boundary
+// concept, so casual phrasing must keep matching (see TestMatch above).
+func TestMatch_ASCIIWordBoundary(t *testing.T) {
+	workflows := []Workflow{
+		{Name: "Status", Trigger: "status", Steps: []WorkflowStep{{ID: "s1", Agent: "shell"}}},
+	}
+
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"status", "Status"},
+		{"orch status", "Status"},
+		{"check cluster status", "Status"},
+		{"statusbar", ""},
+		{"gitstatus", ""},
+		{"my-status-check", "Status"}, // hyphen is a non-alnum boundary, same as regex \b semantics
+	}
+
+	for _, tt := range tests {
+		result := Match(tt.input, workflows)
+		if tt.expected == "" {
+			if result != nil {
+				t.Errorf("Match(%q): expected nil, got %q", tt.input, result.Name)
+			}
+		} else if result == nil || result.Name != tt.expected {
+			t.Errorf("Match(%q): expected %q, got %v", tt.input, tt.expected, result)
+		}
+	}
+}
+
 // TestMatch_CaseInsensitive tests case insensitivity
 func TestMatch_CaseInsensitive(t *testing.T) {
 	workflows := []Workflow{
