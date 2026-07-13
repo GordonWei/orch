@@ -1,7 +1,7 @@
 # 收工流程 — 更新交接表，同步 Notion
-# 觸發：orch "收工"（trigger 目前只支援單一詞，"下班"/"晚安" 不會觸發，見 workflow.Workflow.Trigger）
+# 觸發：orch "收工" / "下班" / "下線" / "晚安"（任一同義詞皆可觸發）
 name: "signoff"
-trigger: "收工"
+trigger: ["收工", "下班", "下線", "晚安"]
 description: "整理今日產出，更新本地交接表，交給 Victoria 同步 Notion"
 steps:
   - id: gather

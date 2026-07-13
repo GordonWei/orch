@@ -215,7 +215,7 @@ func (m *SessionManager) Shutdown() {
 	// Phase 1: Send graceful exit commands to all
 	for _, e := range entries {
 		exitCmd := "/exit\r"
-		if e.backend == session.BackendKiro {
+		if e.backend == session.BackendKiro || e.backend == session.BackendGemini {
 			exitCmd = "/quit\r"
 		}
 		e.ms.sess.Send(exitCmd)

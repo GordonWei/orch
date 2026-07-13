@@ -445,6 +445,8 @@ func parseBackend(s string) session.Backend {
 		return session.BackendClaude
 	case "kiro", "k":
 		return session.BackendKiro
+	case "gemini", "g":
+		return session.BackendGemini
 	default:
 		return ""
 	}

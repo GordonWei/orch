@@ -472,7 +472,7 @@ pkg/
 ├── executor/        DAG parallel execution engine (goroutines + streaming)
 ├── eventbus/        Reactive workflow chaining (trigger rules + MLX gate + summarize)
 ├── session/         PTY-based interactive session (spawn/send/read/kill + idle detection + ANSI strip with alt screen awareness)
-└── workflow/        YAML workflow template loader
+└── workflow/        YAML workflow template loader (trigger synonyms via []string, word-boundary matching)
 
 launchd/             macOS LaunchAgent for MLX daemon
 config.yaml          Config template
@@ -528,6 +528,30 @@ npm install -g @anthropic-ai/gemini  # or: brew install gemini
 ```
 
 ## Changelog
+
+### v0.13.0 (2026-07-13)
+
+**Trigger synonyms ([]string) + Gemini session backend.**
+
+- **Workflow trigger: multiple synonyms** — The `trigger` field in workflow YAML now accepts both a single string (backward-compatible) and an array of strings. Any synonym match fires the workflow. Custom `Triggers` type with `UnmarshalYAML` handles both YAML scalar and sequence nodes transparently.
+  ```yaml
+  # Before (still works):
+  trigger: "收工"
+  # After (new):
+  trigger: ["收工", "下班", "下線", "晚安"]
+  ```
+- **All 5 workflow YAMLs updated** — morning (開工/早安/上線/上班), signoff (收工/下班/下線/晚安), status (status/狀態), weekly-report (週報/weekly report/weekly), handoff-victoria (交給 Victoria/叫 Claude Code/丟給 CC). Aligns with the trigger-keywords table in `.kiro/steering/`.
+- **Gemini session backend** — Session mode now supports `gemini` as a third backend alongside `claude` and `kiro`. Spawns `gemini --skip-trust --yolo` via PTY. Shorthand: `/session g` or `/session gemini`. Kill sends `/quit`.
+- **Router display names** — Gemini now shows proper display name in auto-route suggestions.
+
+### v0.12.0 (2026-07-12)
+
+**Workflow trigger matching + shell integration.**
+
+- **Workflow trigger auto-match** — `runTask()` now checks `workflow.Match(input, workflows)` before AI planning. If the user's input matches a workflow trigger keyword, the workflow executes directly (bypasses MLX/cloud planning entirely). First-match wins.
+- **5 workflow templates** — morning (開工), signoff (收工), status, weekly-report (週報), handoff-victoria (交給 Victoria). Each with Go template variable substitution (`{{.date}}`, `{{.user}}`, etc.).
+- **Shell integration** — `shell/orch.zsh` provides 5 aliases and zsh completion for common orch commands.
+- **ASCII trigger word-boundary** — Prevents short ASCII triggers (like "status") from false-matching inside compound words ("statusbar", "gitstatus"). CJK triggers retain substring matching (no reliable word boundary in CJK text).
 
 ### v0.11.1 (2026-07-12)
 

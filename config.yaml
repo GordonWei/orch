@@ -21,6 +21,11 @@ persona:
 # Supports: "kiro", "claude", "gemini"
 # Leave empty for auto-detection (uses first available in order: kiro > claude > gemini)
 # Override at runtime: --backend flag or ORCH_BACKEND env var
+#
+# Session mode (interactive PTY):
+#   /session claude  (or /session c)  — spawns claude --dangerously-skip-permissions
+#   /session kiro    (or /session k)  — spawns kiro-cli chat --trust-all-tools
+#   /session gemini  (or /session g)  — spawns gemini --skip-trust --yolo
 ai_backend:
   primary: ""    # auto-detect
 
@@ -84,7 +89,7 @@ workflows:
 # routing:
 #   kiro: [code, infra, aws, gcp, terraform, deploy, build, test, file-ops, shell]
 #   claude: [notion, gcal, gmail, google-workspace, writing, analysis, meeting-notes]
-#   gemini: [long-context, video, image, summarization, google-drive]
+#   gemini: [long-context, video, image, summarization, google-drive, research]
 
 # === Keyword Shortcuts ===
 # Commands matching these prefixes bypass AI planning entirely (Layer 1).

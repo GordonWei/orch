@@ -1,7 +1,7 @@
 # 交給 Victoria — 將任務交給 Claude Code 執行
-# 觸發：orch "交給 Victoria"（trigger 目前只支援單一詞，"丟給 CC" 不會觸發，見 workflow.Workflow.Trigger）
+# 觸發：orch "交給 Victoria" / "叫 Claude Code" / "丟給 CC"（任一同義詞皆可觸發）
 name: "handoff-to-victoria"
-trigger: "交給 Victoria"
+trigger: ["交給 Victoria", "叫 Claude Code", "丟給 CC"]
 description: "將指定任務交給 Claude Code (Victoria) 執行"
 steps:
   - id: delegate

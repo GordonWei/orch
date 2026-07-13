@@ -27,11 +27,44 @@ type WorkflowStep struct {
 	OnFailure   string   `yaml:"on_failure,omitempty"`
 }
 
+// Triggers is a string slice that supports YAML unmarshalling from both
+// a single string (backward-compatible) and a list of strings.
+//
+//	trigger: "收工"           → Triggers{"收工"}
+//	trigger: ["收工", "下班"]  → Triggers{"收工", "下班"}
+type Triggers []string
+
+// UnmarshalYAML implements yaml.Unmarshaler for backward-compatible parsing.
+func (t *Triggers) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Kind {
+	case yaml.ScalarNode:
+		// single string: trigger: "收工"
+		*t = Triggers{value.Value}
+		return nil
+	case yaml.SequenceNode:
+		// list of strings: trigger: ["收工", "下班"]
+		var list []string
+		if err := value.Decode(&list); err != nil {
+			return err
+		}
+		*t = list
+		return nil
+	default:
+		// fallback: try scalar
+		var s string
+		if err := value.Decode(&s); err != nil {
+			return err
+		}
+		*t = Triggers{s}
+		return nil
+	}
+}
+
 // Workflow defines a complete workflow template
 type Workflow struct {
 	Name        string            `yaml:"name"`
 	Description string            `yaml:"description"`
-	Trigger     string            `yaml:"trigger"`
+	Trigger     Triggers          `yaml:"trigger"`
 	Variables   map[string]string `yaml:"variables,omitempty"`
 	Steps       []WorkflowStep    `yaml:"steps"`
 }
@@ -71,13 +104,24 @@ func LoadAll(dir string) ([]Workflow, error) {
 			continue // skip files with format errors
 		}
 
-		// requires at least trigger and steps to be valid
-		if w.Trigger != "" && len(w.Steps) > 0 {
+		// requires at least one non-empty trigger and steps to be valid
+		if hasValidTrigger(w.Trigger) && len(w.Steps) > 0 {
 			workflows = append(workflows, w)
 		}
 	}
 
 	return workflows, nil
+}
+
+// hasValidTrigger reports whether the Triggers slice contains at least one
+// non-empty string.
+func hasValidTrigger(triggers Triggers) bool {
+	for _, t := range triggers {
+		if strings.TrimSpace(t) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // Match match workflow trigger keywords against user input
@@ -93,24 +137,26 @@ func Match(input string, workflows []Workflow) *Workflow {
 	inputLower := strings.ToLower(strings.TrimSpace(input))
 
 	for i := range workflows {
-		triggerLower := strings.ToLower(strings.TrimSpace(workflows[i].Trigger))
-		if triggerLower == "" {
-			continue
-		}
+		for _, trigger := range workflows[i].Trigger {
+			triggerLower := strings.ToLower(strings.TrimSpace(trigger))
+			if triggerLower == "" {
+				continue
+			}
 
-		if inputLower == triggerLower {
-			return &workflows[i]
-		}
-
-		if isASCIIOnly(triggerLower) {
-			if containsWholeWord(inputLower, triggerLower) {
+			if inputLower == triggerLower {
 				return &workflows[i]
 			}
-			continue
-		}
 
-		if strings.Contains(inputLower, triggerLower) {
-			return &workflows[i]
+			if isASCIIOnly(triggerLower) {
+				if containsWholeWord(inputLower, triggerLower) {
+					return &workflows[i]
+				}
+				continue
+			}
+
+			if strings.Contains(inputLower, triggerLower) {
+				return &workflows[i]
+			}
 		}
 	}
 

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gordonwei/orch/pkg/config"
+	"gopkg.in/yaml.v3"
 )
 
 // testWorkflowYAML is a test workflow YAML template
@@ -62,8 +63,8 @@ func TestLoadAll(t *testing.T) {
 	for _, w := range workflows {
 		if w.Name == "收工" {
 			found = true
-			if w.Trigger != "收工" {
-				t.Errorf("expected trigger '收工', got '%s'", w.Trigger)
+			if len(w.Trigger) == 0 || w.Trigger[0] != "收工" {
+				t.Errorf("expected first trigger '收工', got '%v'", w.Trigger)
 			}
 			if len(w.Steps) != 2 {
 				t.Errorf("expected 2 steps, got %d", len(w.Steps))
@@ -120,9 +121,9 @@ func TestLoadAll_InvalidYAML(t *testing.T) {
 // TestMatch tests trigger keyword matching
 func TestMatch(t *testing.T) {
 	workflows := []Workflow{
-		{Name: "收工", Trigger: "收工", Steps: []WorkflowStep{{ID: "s1", Agent: "kiro"}}},
-		{Name: "開工", Trigger: "開工", Steps: []WorkflowStep{{ID: "s1", Agent: "kiro"}}},
-		{Name: "Deploy", Trigger: "deploy staging", Steps: []WorkflowStep{{ID: "s1", Agent: "shell"}}},
+		{Name: "收工", Trigger: Triggers{"收工"}, Steps: []WorkflowStep{{ID: "s1", Agent: "kiro"}}},
+		{Name: "開工", Trigger: Triggers{"開工"}, Steps: []WorkflowStep{{ID: "s1", Agent: "kiro"}}},
+		{Name: "Deploy", Trigger: Triggers{"deploy staging"}, Steps: []WorkflowStep{{ID: "s1", Agent: "shell"}}},
 	}
 
 	tests := []struct {
@@ -163,7 +164,7 @@ func TestMatch(t *testing.T) {
 // concept, so casual phrasing must keep matching (see TestMatch above).
 func TestMatch_ASCIIWordBoundary(t *testing.T) {
 	workflows := []Workflow{
-		{Name: "Status", Trigger: "status", Steps: []WorkflowStep{{ID: "s1", Agent: "shell"}}},
+		{Name: "Status", Trigger: Triggers{"status"}, Steps: []WorkflowStep{{ID: "s1", Agent: "shell"}}},
 	}
 
 	tests := []struct {
@@ -193,7 +194,7 @@ func TestMatch_ASCIIWordBoundary(t *testing.T) {
 // TestMatch_CaseInsensitive tests case insensitivity
 func TestMatch_CaseInsensitive(t *testing.T) {
 	workflows := []Workflow{
-		{Name: "Deploy", Trigger: "DEPLOY", Steps: []WorkflowStep{{ID: "s1", Agent: "shell"}}},
+		{Name: "Deploy", Trigger: Triggers{"DEPLOY"}, Steps: []WorkflowStep{{ID: "s1", Agent: "shell"}}},
 	}
 
 	result := Match("deploy", workflows)
@@ -205,12 +206,149 @@ func TestMatch_CaseInsensitive(t *testing.T) {
 	}
 }
 
+// TestMatch_MultipleTriggers tests that a workflow with multiple trigger synonyms
+// matches on any of them.
+func TestMatch_MultipleTriggers(t *testing.T) {
+	workflows := []Workflow{
+		{Name: "收工", Trigger: Triggers{"收工", "下班", "下線", "晚安"}, Steps: []WorkflowStep{{ID: "s1", Agent: "kiro"}}},
+		{Name: "Status", Trigger: Triggers{"status", "狀態"}, Steps: []WorkflowStep{{ID: "s1", Agent: "shell"}}},
+	}
+
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		// primary trigger
+		{"收工", "收工"},
+		// synonym triggers (CJK substring)
+		{"下班", "收工"},
+		{"我要下班了", "收工"},
+		{"下線", "收工"},
+		{"晚安", "收工"},
+		{"今天晚安", "收工"},
+		// ASCII synonym with word boundary
+		{"status", "Status"},
+		{"check status", "Status"},
+		// CJK synonym
+		{"狀態", "Status"},
+		{"看一下狀態", "Status"},
+		// no match
+		{"random input", ""},
+	}
+
+	for _, tt := range tests {
+		result := Match(tt.input, workflows)
+		if tt.expected == "" {
+			if result != nil {
+				t.Errorf("Match(%q): expected nil, got %q", tt.input, result.Name)
+			}
+		} else {
+			if result == nil {
+				t.Errorf("Match(%q): expected %q, got nil", tt.input, tt.expected)
+			} else if result.Name != tt.expected {
+				t.Errorf("Match(%q): expected %q, got %q", tt.input, tt.expected, result.Name)
+			}
+		}
+	}
+}
+
+// TestTriggers_UnmarshalYAML_Scalar tests YAML scalar → Triggers slice
+func TestTriggers_UnmarshalYAML_Scalar(t *testing.T) {
+	yamlData := `name: "test"
+trigger: "收工"
+steps:
+  - id: s1
+    agent: kiro
+    prompt: "test"
+`
+	var w Workflow
+	if err := yaml.Unmarshal([]byte(yamlData), &w); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if len(w.Trigger) != 1 || w.Trigger[0] != "收工" {
+		t.Errorf("expected Triggers{\"收工\"}, got %v", w.Trigger)
+	}
+}
+
+// TestTriggers_UnmarshalYAML_Sequence tests YAML sequence → Triggers slice
+func TestTriggers_UnmarshalYAML_Sequence(t *testing.T) {
+	yamlData := `name: "test"
+trigger: ["收工", "下班", "晚安"]
+steps:
+  - id: s1
+    agent: kiro
+    prompt: "test"
+`
+	var w Workflow
+	if err := yaml.Unmarshal([]byte(yamlData), &w); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if len(w.Trigger) != 3 {
+		t.Fatalf("expected 3 triggers, got %d: %v", len(w.Trigger), w.Trigger)
+	}
+	expected := []string{"收工", "下班", "晚安"}
+	for i, e := range expected {
+		if w.Trigger[i] != e {
+			t.Errorf("trigger[%d]: expected %q, got %q", i, e, w.Trigger[i])
+		}
+	}
+}
+
+// TestLoadAll_MultipleTriggers tests LoadAll with YAML that uses []string triggers
+func TestLoadAll_MultipleTriggers(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	yamlContent := `name: "收工"
+description: "signoff"
+trigger: ["收工", "下班", "晚安"]
+steps:
+  - id: step_1
+    agent: kiro
+    prompt: "do signoff"
+`
+	os.WriteFile(filepath.Join(tmpDir, "signoff.yaml"), []byte(yamlContent), 0644)
+
+	workflows, err := LoadAll(tmpDir)
+	if err != nil {
+		t.Fatalf("LoadAll failed: %v", err)
+	}
+	if len(workflows) != 1 {
+		t.Fatalf("expected 1 workflow, got %d", len(workflows))
+	}
+	if len(workflows[0].Trigger) != 3 {
+		t.Errorf("expected 3 triggers, got %d", len(workflows[0].Trigger))
+	}
+}
+
+// TestHasValidTrigger tests the validation helper
+func TestHasValidTrigger(t *testing.T) {
+	tests := []struct {
+		triggers Triggers
+		valid    bool
+	}{
+		{Triggers{"收工"}, true},
+		{Triggers{"收工", "下班"}, true},
+		{Triggers{""}, false},
+		{Triggers{" "}, false},
+		{Triggers{}, false},
+		{nil, false},
+		{Triggers{"", "下班"}, true}, // at least one valid
+	}
+
+	for _, tt := range tests {
+		result := hasValidTrigger(tt.triggers)
+		if result != tt.valid {
+			t.Errorf("hasValidTrigger(%v): expected %v, got %v", tt.triggers, tt.valid, result)
+		}
+	}
+}
+
 // TestToPlanner tests conversion to planner.Plan
 func TestToPlanner(t *testing.T) {
 	w := &Workflow{
 		Name:        "收工",
 		Description: "execute signoff workflow",
-		Trigger:     "收工",
+		Trigger:     Triggers{"收工"},
 		Variables: map[string]string{
 			"project": "Cowork",
 		},
@@ -288,7 +426,7 @@ func TestToPlanner_MultipleDependsOn(t *testing.T) {
 	w := &Workflow{
 		Name:        "test",
 		Description: "test workflow",
-		Trigger:     "test",
+		Trigger:     Triggers{"test"},
 		Steps: []WorkflowStep{
 			{ID: "step_1", Agent: "kiro", Prompt: "a"},
 			{ID: "step_2", Agent: "kiro", Prompt: "b"},

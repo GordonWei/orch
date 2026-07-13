@@ -1,7 +1,7 @@
 # 週報生成 — 從 history + handoff 生成週報草稿
-# 觸發：orch "週報"（trigger 目前只支援單一詞，"weekly" 不會觸發，見 workflow.Workflow.Trigger）
+# 觸發：orch "週報" / "weekly report" / "weekly"（任一同義詞皆可觸發）
 name: "weekly-report"
-trigger: "週報"
+trigger: ["週報", "weekly report", "weekly"]
 description: "彙整本週完成項目，生成週報草稿"
 steps:
   - id: collect_history

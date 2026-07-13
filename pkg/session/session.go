@@ -20,6 +20,7 @@ type Backend string
 const (
 	BackendClaude Backend = "claude"
 	BackendKiro   Backend = "kiro"
+	BackendGemini Backend = "gemini"
 )
 
 // Config holds session configuration.
@@ -63,6 +64,8 @@ func Spawn(cfg Config) (*Session, error) {
 		cmd = exec.Command("claude", "--dangerously-skip-permissions")
 	case BackendKiro:
 		cmd = exec.Command("kiro-cli", "chat", "--trust-all-tools")
+	case BackendGemini:
+		cmd = exec.Command("gemini", "--skip-trust", "--yolo")
 	default:
 		return nil, fmt.Errorf("unsupported backend: %s", cfg.Backend)
 	}
@@ -217,6 +220,8 @@ func (s *Session) Kill() error {
 	// Try graceful exit first
 	exitCmd := "/exit\r"
 	if s.cfg.Backend == BackendKiro {
+		exitCmd = "/quit\r"
+	} else if s.cfg.Backend == BackendGemini {
 		exitCmd = "/quit\r"
 	}
 	s.ptmx.Write([]byte(exitCmd))

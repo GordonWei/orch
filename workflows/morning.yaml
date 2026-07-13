@@ -1,7 +1,7 @@
 # 開工流程 — 讀取交接表，回報待辦與建議
-# 觸發：orch "開工"（trigger 目前只支援單一詞，"早安"/"上線" 不會觸發，見 workflow.Workflow.Trigger）
+# 觸發：orch "開工" / "早安" / "上線" / "上班"（任一同義詞皆可觸發）
 name: "morning"
-trigger: "開工"
+trigger: ["開工", "早安", "上線", "上班"]
 description: "讀取三層交接表，回報待辦清單與今日建議"
 steps:
   - id: read_handoff

@@ -347,6 +347,8 @@ func buildHintReason(rule *config.RouteRule, current session.Backend) string {
 		targetName = "Claude (Victoria)"
 	case session.BackendKiro:
 		targetName = "Kiro"
+	case session.BackendGemini:
+		targetName = "Gemini"
 	default:
 		targetName = rule.Target
 	}
@@ -356,6 +358,8 @@ func buildHintReason(rule *config.RouteRule, current session.Backend) string {
 		currentName = "Claude"
 	case session.BackendKiro:
 		currentName = "Kiro"
+	case session.BackendGemini:
+		currentName = "Gemini"
 	default:
 		currentName = string(current)
 	}

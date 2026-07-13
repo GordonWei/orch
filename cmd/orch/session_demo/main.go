@@ -22,8 +22,10 @@ func main() {
 			backend = session.BackendKiro
 		case "claude":
 			backend = session.BackendClaude
+		case "gemini":
+			backend = session.BackendGemini
 		default:
-			fmt.Fprintf(os.Stderr, "usage: session_demo [claude|kiro]\n")
+			fmt.Fprintf(os.Stderr, "usage: session_demo [claude|kiro|gemini]\n")
 			os.Exit(1)
 		}
 	}
