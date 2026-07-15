@@ -248,6 +248,24 @@ func defaultRouteRules() RouteRulesConfig {
 			{Pattern: "數位銀行", Target: "claude", Strength: 3, Type: "phrase"},
 			{Pattern: "google calendar", Target: "claude", Strength: 3, Type: "phrase"},
 
+			// Gemini phrases
+			{Pattern: "用 gemini", Target: "gemini", Strength: 3, Type: "phrase"},
+			{Pattern: "交給 gemini", Target: "gemini", Strength: 3, Type: "phrase"},
+			{Pattern: "summarize this", Target: "gemini", Strength: 3, Type: "phrase"},
+			{Pattern: "摘要這", Target: "gemini", Strength: 3, Type: "phrase"},
+			{Pattern: "幫我摘要", Target: "gemini", Strength: 3, Type: "phrase"},
+			{Pattern: "google drive", Target: "gemini", Strength: 3, Type: "phrase"},
+			{Pattern: "google docs", Target: "gemini", Strength: 3, Type: "phrase"},
+			{Pattern: "google sheets", Target: "gemini", Strength: 3, Type: "phrase"},
+			{Pattern: "analyze image", Target: "gemini", Strength: 3, Type: "phrase"},
+			{Pattern: "analyze video", Target: "gemini", Strength: 3, Type: "phrase"},
+			{Pattern: "看這張圖", Target: "gemini", Strength: 3, Type: "phrase"},
+			{Pattern: "看這個影片", Target: "gemini", Strength: 3, Type: "phrase"},
+			{Pattern: "分析這張", Target: "gemini", Strength: 3, Type: "phrase"},
+			{Pattern: "long context", Target: "gemini", Strength: 3, Type: "phrase"},
+			{Pattern: "長文分析", Target: "gemini", Strength: 3, Type: "phrase"},
+			{Pattern: "深度分析", Target: "gemini", Strength: 3, Type: "phrase"},
+
 			// Kiro phrases
 			{Pattern: "terraform plan", Target: "kiro", Strength: 3, Type: "phrase"},
 			{Pattern: "terraform apply", Target: "kiro", Strength: 3, Type: "phrase"},
@@ -327,6 +345,25 @@ func defaultRouteRules() RouteRulesConfig {
 			// Kiro keywords — weak (strength 1)
 			{Pattern: "build", Target: "kiro", Strength: 1, Type: "keyword"},
 			{Pattern: "test", Target: "kiro", Strength: 1, Type: "keyword"},
+
+			// Gemini keywords — strong (strength 3)
+			{Pattern: "gemini", Target: "gemini", Strength: 3, Type: "keyword"},
+			{Pattern: "drive", Target: "gemini", Strength: 3, Type: "keyword"},
+			{Pattern: "研究", Target: "gemini", Strength: 3, Type: "keyword"},
+
+			// Gemini keywords — medium (strength 2)
+			{Pattern: "summarize", Target: "gemini", Strength: 2, Type: "keyword"},
+			{Pattern: "摘要", Target: "gemini", Strength: 2, Type: "keyword"},
+			{Pattern: "影片", Target: "gemini", Strength: 2, Type: "keyword"},
+			{Pattern: "video", Target: "gemini", Strength: 2, Type: "keyword"},
+			{Pattern: "image", Target: "gemini", Strength: 2, Type: "keyword"},
+			{Pattern: "圖片", Target: "gemini", Strength: 2, Type: "keyword"},
+			{Pattern: "pdf", Target: "gemini", Strength: 2, Type: "keyword"},
+			{Pattern: "research", Target: "gemini", Strength: 2, Type: "keyword"},
+			{Pattern: "調研", Target: "gemini", Strength: 2, Type: "keyword"},
+			{Pattern: "評估", Target: "gemini", Strength: 2, Type: "keyword"},
+			{Pattern: "比較", Target: "gemini", Strength: 2, Type: "keyword"},
+			{Pattern: "compare", Target: "gemini", Strength: 2, Type: "keyword"},
 
 			// ══════════════════════════════════════════════════════════════
 			// CLI RULES (type="cli") — first-word detection for shell routing

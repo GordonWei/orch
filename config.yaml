@@ -91,6 +91,28 @@ workflows:
 #   claude: [notion, gcal, gmail, google-workspace, writing, analysis, meeting-notes]
 #   gemini: [long-context, video, image, summarization, google-drive, research]
 
+# === Route Rules (v0.14+) ===
+# The default config ships with ~120 rules covering claude/kiro/gemini/shell/local.
+# Add custom rules here — they MERGE with defaults (do not override them).
+# route_rules:
+#   cooldown: 3
+#   auto_route: false
+#   history_size: 5
+#   rules:
+#     # Gemini examples (v0.14 built-in):
+#     - pattern: "用 gemini"
+#       target: gemini
+#       strength: 3
+#       type: phrase
+#     - pattern: "google drive"
+#       target: gemini
+#       strength: 3
+#       type: phrase
+#     - pattern: summarize
+#       target: gemini
+#       strength: 2
+#       type: keyword
+
 # === Keyword Shortcuts ===
 # Commands matching these prefixes bypass AI planning entirely (Layer 1).
 keyword_shortcuts:

@@ -387,7 +387,7 @@ func TestDefaultConfig_RouteRules(t *testing.T) {
 	}
 
 	// Verify targets are valid
-	validTargets := map[string]bool{"claude": true, "kiro": true, "shell": true, "local": true}
+	validTargets := map[string]bool{"claude": true, "kiro": true, "shell": true, "local": true, "gemini": true}
 	for _, rule := range rules.Rules {
 		if !validTargets[rule.Target] {
 			t.Errorf("rule %q has invalid target %q", rule.Pattern, rule.Target)

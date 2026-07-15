@@ -380,6 +380,8 @@ func buildHintReason(rule *config.RouteRule, current session.Backend) string {
 		domain = "Notion/文件/管理"
 	case session.BackendKiro:
 		domain = "基礎設施/程式碼/部署"
+	case session.BackendGemini:
+		domain = "長文分析/研究/Google 生態"
 	default:
 		domain = rule.Target
 	}

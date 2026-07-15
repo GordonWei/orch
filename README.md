@@ -529,6 +529,22 @@ npm install -g @anthropic-ai/gemini  # or: brew install gemini
 
 ## Changelog
 
+### v0.14.0 (2026-07-15)
+
+**Gemini routing rules — automatic session switching for long-context, multimodal, and Google ecosystem tasks.**
+
+The route rules now include Gemini as a first-class routing target. When you're in a claude or kiro session and type something that's better suited for Gemini (e.g., "summarize this 200-page PDF", "看這張圖", "google drive"), orch suggests (or auto-switches if `/auto` is on) to the gemini session.
+
+- **31 new Gemini route rules** — 16 phrase rules (strength 3) and 15 keyword rules (3 strong + 12 medium) covering:
+  - **Explicit invocation**: "用 gemini", "交給 gemini"
+  - **Long-context analysis**: "summarize this", "long context", "長文分析", "深度分析", "摘要"
+  - **Google ecosystem**: "google drive", "google docs", "google sheets"
+  - **Multimodal**: "analyze image", "analyze video", "看這張圖", "看這個影片", "分析這張"
+  - **Research**: "研究", "research", "調研", "評估", "比較", "compare"
+  - **Media & documents**: "pdf", "video", "image", "影片", "圖片"
+- **Gemini hint domain label** — `buildHintReason()` now shows "長文分析/研究/Google 生態" for Gemini suggestions (previously fell through to raw target string).
+- **No conflicts with existing rules** — Gemini rules occupy the whitespace between claude (Notion/文件/管理) and kiro (基礎設施/程式碼/部署). Keywords like "notion", "terraform", "deploy" remain untouched.
+
 ### v0.13.0 (2026-07-13)
 
 **Trigger synonyms ([]string) + Gemini session backend.**
