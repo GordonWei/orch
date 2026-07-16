@@ -294,13 +294,13 @@ Response rules:
 			Bedrock: BedrockAPIConfig{
 				Enabled: false,
 				Region:  "us-east-1",
-				ModelID: "us.anthropic.claude-sonnet-4-20250514-v1:0",
+				ModelID: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
 			},
 			VertexAI: VertexAIAPIConfig{
 				Enabled:   false,
 				ProjectID: "",
 				Region:    "us-central1",
-				ModelID:   "gemini-2.0-flash",
+				ModelID:   "gemini-2.5-flash",
 			},
 		},
 	}
