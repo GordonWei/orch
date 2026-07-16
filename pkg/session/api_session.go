@@ -84,50 +84,58 @@ func (s *APISession) Send(input string) error {
 		return ErrSessionExited
 	}
 
-	// Close old stream channel if still open
-	if s.streamCh != nil {
-		close(s.streamCh)
-		s.streamCh = nil
-	}
-
-	// Cancel any in-flight request
+	// Cancel any in-flight request — this causes the old goroutine to stop
+	// writing and close its own channel via defer.
 	if s.cancel != nil {
 		s.cancel()
 	}
 
+	// Wait briefly for old goroutine to finish closing its channel
+	oldCh := s.streamCh
+	s.streamCh = nil
+	s.mu.Unlock()
+
+	// If there was an old channel, drain it to unblock the old goroutine
+	if oldCh != nil {
+		for range oldCh {
+		}
+	}
+
+	s.mu.Lock()
 	// Append user message to history
 	s.history = append(s.history, StreamMessage{Role: "user", Content: input})
 
 	// Create new stream channel
-	s.streamCh = make(chan string, 64)
+	newCh := make(chan string, 64)
+	s.streamCh = newCh
 	s.idle = false
 
 	// Build request with conversation history
 	req := StreamRequest{
-		Messages:    s.history,
+		Messages:    append([]StreamMessage{}, s.history...),
 		MaxTokens:   4096,
 		Temperature: 0.7,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	s.cancel = cancel
-	ch := s.streamCh
 	s.mu.Unlock()
 
-	// Start streaming in background
-	go s.streamResponse(ctx, req, ch)
+	// Start streaming in background — goroutine owns newCh and will close it
+	go s.streamResponse(ctx, req, newCh)
 
 	return nil
 }
 
 // streamResponse invokes the streaming API and pipes chunks to the stream channel.
+// The goroutine owns `ch` and is the only one that closes it.
 func (s *APISession) streamResponse(ctx context.Context, req StreamRequest, ch chan string) {
 	defer func() {
+		close(ch) // goroutine is sole owner of ch; safe to close
 		s.mu.Lock()
 		s.idle = true
-		// Only close if this is still the active stream channel
+		// Clear streamCh only if it's still pointing to our channel
 		if s.streamCh == ch {
-			close(s.streamCh)
 			s.streamCh = nil
 		}
 		s.mu.Unlock()
@@ -135,20 +143,23 @@ func (s *APISession) streamResponse(ctx context.Context, req StreamRequest, ch c
 
 	chunks, err := s.backend.InvokeStream(ctx, req)
 	if err != nil {
-		// Send error message to stream
 		select {
 		case ch <- "❌ " + err.Error() + "\n":
-		default:
+		case <-ctx.Done():
 		}
 		return
 	}
 
 	var fullResponse strings.Builder
 	for chunk := range chunks {
+		if ctx.Err() != nil {
+			// Context cancelled (new Send() or Kill() happened) — stop writing
+			return
+		}
 		if chunk.Error != nil {
 			select {
 			case ch <- "\n❌ stream error: " + chunk.Error.Error() + "\n":
-			default:
+			case <-ctx.Done():
 			}
 			break
 		}
@@ -156,8 +167,8 @@ func (s *APISession) streamResponse(ctx context.Context, req StreamRequest, ch c
 			fullResponse.WriteString(chunk.Text)
 			select {
 			case ch <- chunk.Text:
-			default:
-				// Channel full, drop chunk (shouldn't happen with buffer 64)
+			case <-ctx.Done():
+				return
 			}
 		}
 		if chunk.Done {
@@ -216,16 +227,14 @@ func (s *APISession) Kill() error {
 		return nil
 	}
 
-	// Cancel in-flight request
+	// Cancel in-flight request — the goroutine will close its channel via defer
 	if s.cancel != nil {
 		s.cancel()
 	}
 
-	// Close stream channel
-	if s.streamCh != nil {
-		close(s.streamCh)
-		s.streamCh = nil
-	}
+	// Do NOT close streamCh here — the owning goroutine will close it
+	// when it detects context cancellation. Just nil out our reference.
+	s.streamCh = nil
 
 	s.alive = false
 	close(s.done)
