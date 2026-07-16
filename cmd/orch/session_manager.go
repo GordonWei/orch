@@ -18,19 +18,20 @@ type SessionEvent struct {
 // SessionManager manages multiple interactive PTY sessions.
 // At most one session per backend; one is "active" at any time (or none).
 type SessionManager struct {
-	mu          sync.Mutex
-	sessions    map[session.Backend]*managedSession
-	active      session.Backend // "" means no active session (normal mode)
-	autoRestart map[session.Backend]bool
-	events      chan SessionEvent
-	stopWatch   chan struct{}
-	stopOnce    sync.Once
-	shutdown    bool // set once Shutdown() has started; permanently blocks late writes from checkSessions' auto-restart
-	generation  int  // bumped by Shutdown()/KillAll(); lets checkSessions() detect a kill-all happened while it was mid-restart
+	mu                sync.Mutex
+	sessions          map[session.Backend]*managedSession
+	active            session.Backend // "" means no active session (normal mode)
+	autoRestart       map[session.Backend]bool
+	events            chan SessionEvent
+	stopWatch         chan struct{}
+	stopOnce          sync.Once
+	shutdown          bool // set once Shutdown() has started; permanently blocks late writes from checkSessions' auto-restart
+	generation        int  // bumped by Shutdown()/KillAll(); lets checkSessions() detect a kill-all happened while it was mid-restart
+	apiBackendFactory func(session.Backend) (session.StreamingBackend, error)
 }
 
 type managedSession struct {
-	sess         *session.Session
+	sess         session.SessionLike
 	startedAt    time.Time
 	restartCount int
 	lastOutput   time.Time
@@ -43,6 +44,14 @@ func NewSessionManager() *SessionManager {
 		events:      make(chan SessionEvent, 16),
 		stopWatch:   make(chan struct{}),
 	}
+}
+
+// SetAPIBackendFactory sets the factory function for creating streaming API backends.
+// Called during initialization with a closure that captures the apiBackends map.
+func (m *SessionManager) SetAPIBackendFactory(factory func(session.Backend) (session.StreamingBackend, error)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.apiBackendFactory = factory
 }
 
 // Events returns the read-only channel for session lifecycle events.
@@ -365,7 +374,7 @@ func (m *SessionManager) KillAll() {
 	// KillAll() can be called mid-session (e.g. `/kill all`) and the
 	// manager keeps running afterward.
 	m.generation++
-	toKill := make([]*session.Session, 0, len(m.sessions))
+	toKill := make([]session.SessionLike, 0, len(m.sessions))
 	for _, ms := range m.sessions {
 		toKill = append(toKill, ms.sess)
 	}
@@ -379,7 +388,7 @@ func (m *SessionManager) KillAll() {
 }
 
 // Active returns the currently active session (nil if normal mode).
-func (m *SessionManager) Active() *session.Session {
+func (m *SessionManager) Active() session.SessionLike {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -450,7 +459,7 @@ type SessionInfo struct {
 }
 
 // Get returns the session for a specific backend (nil if not exists/dead).
-func (m *SessionManager) Get(backend session.Backend) *session.Session {
+func (m *SessionManager) Get(backend session.Backend) session.SessionLike {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -483,7 +492,28 @@ func (m *SessionManager) SpawnOrSwitch(backend session.Backend) error {
 	}
 	m.mu.Unlock()
 
-	// Need to spawn (lock released during potentially slow operation)
+	// API backends: create APISession (no PTY process needed)
+	if backend == session.BackendBedrock || backend == session.BackendVertexAI {
+		if m.apiBackendFactory == nil {
+			return fmt.Errorf("API backend %s not configured (enable in config.yaml)", backend)
+		}
+		sb, err := m.apiBackendFactory(backend)
+		if err != nil {
+			return fmt.Errorf("spawn %s: %w", backend, err)
+		}
+		apiSess := session.NewAPISession(sb, backend)
+		m.mu.Lock()
+		m.sessions[backend] = &managedSession{
+			sess:       apiSess,
+			startedAt:  time.Now(),
+			lastOutput: time.Now(),
+		}
+		m.active = backend
+		m.mu.Unlock()
+		return nil
+	}
+
+	// PTY backends: spawn CLI process
 	cfg := session.DefaultConfig(backend)
 	sess, err := session.Spawn(cfg)
 	if err != nil {

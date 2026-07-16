@@ -18,9 +18,11 @@ import (
 type Backend string
 
 const (
-	BackendClaude Backend = "claude"
-	BackendKiro   Backend = "kiro"
-	BackendGemini Backend = "gemini"
+	BackendClaude   Backend = "claude"
+	BackendKiro     Backend = "kiro"
+	BackendGemini   Backend = "gemini"
+	BackendBedrock  Backend = "bedrock"
+	BackendVertexAI Backend = "vertexai"
 )
 
 // Config holds session configuration.

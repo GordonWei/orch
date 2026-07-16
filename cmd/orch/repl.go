@@ -44,6 +44,24 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br
 
 	// Session manager for interactive PTY sessions
 	sm := NewSessionManager()
+	// Wire API backends for /session bedrock and /session vertexai
+	if len(apiBackends) > 0 {
+		sm.SetAPIBackendFactory(func(backend session.Backend) (session.StreamingBackend, error) {
+			ab, ok := apiBackends[string(backend)]
+			if !ok {
+				return nil, fmt.Errorf("API backend %s not configured", backend)
+			}
+			// apibackend.BedrockBackend and VertexAIBackend implement session.StreamingBackend
+			sb, ok := ab.(session.StreamingBackend)
+			if !ok {
+				return nil, fmt.Errorf("API backend %s does not support streaming", backend)
+			}
+			if !ab.Available() {
+				return nil, fmt.Errorf("API backend %s credentials not available", backend)
+			}
+			return sb, nil
+		})
+	}
 	sm.WatchSessions()
 	defer sm.Shutdown()
 
@@ -468,9 +486,9 @@ func parseBackend(s string) session.Backend {
 	case "gemini", "g":
 		return session.BackendGemini
 	case "bedrock", "br":
-		return "bedrock"
+		return session.BackendBedrock
 	case "vertexai", "vertex", "va":
-		return "vertexai"
+		return session.BackendVertexAI
 	default:
 		return ""
 	}
