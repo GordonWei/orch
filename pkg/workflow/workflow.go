@@ -147,8 +147,8 @@ func Match(input string, workflows []Workflow) *Workflow {
 				return &workflows[i]
 			}
 
-			if isASCIIOnly(triggerLower) {
-				if containsWholeWord(inputLower, triggerLower) {
+			if config.IsASCIIOnly(triggerLower) {
+				if config.ContainsWholeWord(inputLower, triggerLower) {
 					return &workflows[i]
 				}
 				continue
@@ -161,44 +161,6 @@ func Match(input string, workflows []Workflow) *Workflow {
 	}
 
 	return nil
-}
-
-// isASCIIOnly reports whether s contains only ASCII bytes.
-func isASCIIOnly(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if s[i] >= 0x80 {
-			return false
-		}
-	}
-	return true
-}
-
-// containsWholeWord reports whether needle appears in haystack with
-// non-alphanumeric (or string-boundary) characters on both sides — it still
-// matches "status" inside "check cluster status", but not inside
-// "statusbar" or "gitstatus".
-func containsWholeWord(haystack, needle string) bool {
-	start := 0
-	for {
-		idx := strings.Index(haystack[start:], needle)
-		if idx == -1 {
-			return false
-		}
-		idx += start
-
-		beforeOK := idx == 0 || !isAlnum(haystack[idx-1])
-		afterIdx := idx + len(needle)
-		afterOK := afterIdx >= len(haystack) || !isAlnum(haystack[afterIdx])
-
-		if beforeOK && afterOK {
-			return true
-		}
-		start = idx + 1
-	}
-}
-
-func isAlnum(b byte) bool {
-	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
 }
 
 // ToPlanner converts Workflow to planner.Plan for executor

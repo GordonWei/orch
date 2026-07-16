@@ -108,9 +108,19 @@ CREATE TABLE IF NOT EXISTS briefing (
     content TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS session_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+    backend TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_history_timestamp ON history(timestamp);
 CREATE INDEX IF NOT EXISTS idx_history_category ON history(category);
 CREATE INDEX IF NOT EXISTS idx_history_tags ON history(tags);
+CREATE INDEX IF NOT EXISTS idx_session_logs_backend ON session_logs(backend);
+CREATE INDEX IF NOT EXISTS idx_session_logs_timestamp ON session_logs(timestamp);
 `
 
 // --- History ---
@@ -372,6 +382,86 @@ func (s *Store) PruneHistory(olderThanSeconds int64) (int64, error) {
 		result, err = s.db.Exec(
 			"DELETE FROM history WHERE timestamp < datetime('now', ? || ' seconds')",
 			fmt.Sprintf("-%d", olderThanSeconds))
+	}
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+// --- Session Logs ---
+
+// SessionLogEntry represents a single input or output in a session conversation.
+type SessionLogEntry struct {
+	ID        int64
+	Timestamp string
+	Backend   string
+	Role      string // "user" or "assistant"
+	Content   string
+}
+
+// AddSessionLog records a session interaction (user input or assistant output).
+func (s *Store) AddSessionLog(backend, role, content string) error {
+	_, err := s.db.Exec(`
+		INSERT INTO session_logs (backend, role, content) VALUES (?, ?, ?)`,
+		backend, role, content)
+	return err
+}
+
+// RecentSessionLogs returns the N most recent log entries for a given backend.
+func (s *Store) RecentSessionLogs(backend string, limit int) ([]SessionLogEntry, error) {
+	rows, err := s.db.Query(`
+		SELECT id, timestamp, backend, role, content
+		FROM session_logs
+		WHERE backend = ?
+		ORDER BY id DESC LIMIT ?`, backend, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []SessionLogEntry
+	for rows.Next() {
+		var e SessionLogEntry
+		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Backend, &e.Role, &e.Content); err != nil {
+			return nil, err
+		}
+		entries = append(entries, e)
+	}
+	// Reverse so oldest-first
+	for i, j := 0, len(entries)-1; i < j; i, j = i+1, j-1 {
+		entries[i], entries[j] = entries[j], entries[i]
+	}
+	return entries, nil
+}
+
+// LastSessionOutput returns the most recent assistant output for a given backend.
+func (s *Store) LastSessionOutput(backend string) (string, error) {
+	var content string
+	err := s.db.QueryRow(`
+		SELECT content FROM session_logs
+		WHERE backend = ? AND role = 'assistant'
+		ORDER BY id DESC LIMIT 1`, backend).Scan(&content)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", nil
+		}
+		return "", err
+	}
+	return content, nil
+}
+
+// PruneSessionLogs deletes session logs older than the given number of days.
+// Pass 0 to delete all.
+func (s *Store) PruneSessionLogs(olderThanDays int) (int64, error) {
+	var result sql.Result
+	var err error
+	if olderThanDays == 0 {
+		result, err = s.db.Exec("DELETE FROM session_logs")
+	} else {
+		result, err = s.db.Exec(
+			"DELETE FROM session_logs WHERE timestamp < datetime('now', ? || ' days')",
+			fmt.Sprintf("-%d", olderThanDays))
 	}
 	if err != nil {
 		return 0, err

@@ -569,3 +569,47 @@ func TestAutoRoute_Toggle(t *testing.T) {
 		t.Error("AutoRoute should be false after SetAutoRoute(false)")
 	}
 }
+
+// TestSuggestBackend_GoogleDriveNotFalsePositive guards against a regression
+// where the Gemini routing rule matched the bare keyword "drive" via plain
+// substring search, so everyday phrases like "hard drive" or "test drive"
+// (nothing to do with Google Drive) would auto-route to gemini. The fix
+// narrowed the pattern to the "google drive" phrase.
+func TestSuggestBackend_GoogleDriveNotFalsePositive(t *testing.T) {
+	r := testRouter()
+
+	falsePositives := []string{
+		"my hard drive died",
+		"let's do a test drive of the new API",
+		"the sales drive starts monday",
+	}
+	for _, input := range falsePositives {
+		t.Run(input, func(t *testing.T) {
+			backend, _ := r.SuggestBackend(input)
+			if backend == session.BackendGemini {
+				t.Errorf("SuggestBackend(%q) = gemini, want NOT gemini (false positive on 'drive')", input)
+			}
+		})
+	}
+
+	backend, _ := r.SuggestBackend("summarize the file in google drive")
+	if backend != session.BackendGemini {
+		t.Errorf("SuggestBackend(%q) = %q, want gemini", "summarize the file in google drive", backend)
+	}
+}
+
+// TestRuleMatches_WordBoundary guards against a regression where ASCII
+// keyword rules matched via plain substring search with no word-boundary
+// check, so "OneDrive" (no space) could still false-positive-match a
+// standalone "drive" keyword rule if one existed. ruleMatches now requires
+// a whole-word match for Type:"keyword" ASCII patterns.
+func TestRuleMatches_WordBoundary(t *testing.T) {
+	rule := &config.RouteRule{Pattern: "drive", Target: "gemini", Strength: 3, Type: "keyword"}
+
+	if ruleMatches("onedrive sync broke", rule) {
+		t.Error(`ruleMatches("onedrive sync broke", "drive" keyword) = true, want false (not a whole word)`)
+	}
+	if !ruleMatches("please check my drive for the file", rule) {
+		t.Error(`ruleMatches("please check my drive ...", "drive" keyword) = false, want true (whole word)`)
+	}
+}

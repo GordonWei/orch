@@ -529,6 +529,29 @@ npm install -g @anthropic-ai/gemini  # or: brew install gemini
 
 ## Changelog
 
+### v0.15.0 (2026-07-16)
+
+**Session persistence, cross-session context passing, and approval gate — plus a same-day review that found and fixed 9 real bugs before this shipped.**
+
+Three features that make orch's multi-session mode significantly more useful and safe.
+
+- **Session output persistence** — All session mode conversations (user input + assistant output) are now automatically persisted to SQLite (`session_logs` table). Survives session kills and orch restarts. New `/session-history` (shorthand `/sh`) command shows the last 20 entries for a backend. New `Store.AddSessionLog()`, `RecentSessionLogs()`, `LastSessionOutput()`, and `PruneSessionLogs()` APIs in the memory package. `orch session-history clear [days]` prunes the table (mirrors `orch history clear`) — without this, `session_logs` had no reachable cleanup path and grew unbounded.
+- **Cross-session context passing (`/pass`)** — Transfer the last assistant output from one session to another with a single command. Two forms: `/pass <target>` (current → target) and `/pass <from> <to>` (explicit source → target). The context is injected as a prefixed message and the target's acknowledgment is streamed back. This is orch's core differentiator over simply running multiple terminals — sessions can now build on each other's work. Truncation of long outputs is now rune-safe (`executor.TruncateWithSuffix`) instead of a raw byte slice, so it can't split a multi-byte UTF-8 character (this codebase is CJK-heavy).
+- **Approval Gate for high-risk commands** — The DAG executor checks shell commands against 40+ high-risk patterns (terraform apply/destroy, kubectl delete, rm -rf, git push --force, docker system prune, AWS/GCP delete operations, SQL DROP/TRUNCATE, etc.) before execution, applied to **both** workflow execution (`/w`) and normal task execution. The pattern list is now config-driven (`high_risk_patterns` in `config.yaml`, defaults to the built-in list) instead of a hardcoded package-level table. Concurrent high-risk steps in the same DAG no longer race on stdin (approval prompts are serialized). Non-interactive/piped invocations get a clear "denied by default, cannot prompt" message instead of silently blocking on a drained stdin; set `ORCH_AUTO_APPROVE=1` to bypass the gate in CI/scripts. Ctrl+C now interrupts a pending approval prompt instead of hanging.
+- **`/session-history` (`/sh`) command** — View persisted session conversation history for any backend. Shows timestamped entries with role indicators (👤 user / 🤖 assistant).
+- **Gemini routing false-positive fix** — the "drive" keyword rule (added in v0.14.0) matched as a bare substring, so "hard drive"/"test drive" would auto-route to gemini. Narrowed to the "google drive" phrase, and ASCII keyword rules generally now require a whole-word match (`pkg/config.ContainsWholeWord`, shared with the workflow trigger matcher instead of duplicated).
+
+**🔴 Same-day review, 9 bugs found and fixed before release** (see `Study/docs/_agent_handoff.md` 2026-07-16 for the full review):
+1. `/w` workflow execution completely bypassed the approval gate (`ApprovalFunc` was never set on that code path) — most severe, contradicted this very changelog's original claim.
+2. Non-interactive/CI invocations had no real opt-out and silently denied every high-risk command.
+3. Concurrent high-risk steps raced on stdin for approval input.
+4. `/pass` and `/session-history` truncated with a raw byte slice, risking invalid UTF-8 on Chinese text.
+5. The "drive" keyword rule false-positived on common phrases (see above).
+6. `PruneSessionLogs` was dead code with no caller.
+7. Approval prompts didn't respect Ctrl+C.
+8. `AddSessionLog` errors were silently discarded at all 4 call sites.
+9. `isHighRiskCommand`'s pattern list was hardcoded and non-configurable (altitude issue — duplicated the shape of the config-driven rule engine `pkg/router` already exists to replace).
+
 ### v0.14.0 (2026-07-15)
 
 **Gemini routing rules — automatic session switching for long-context, multimodal, and Google ecosystem tasks.**

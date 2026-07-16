@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -225,6 +226,8 @@ func handleSubcommand(args cliArgs, cfg *config.Config, store *memory.Store) {
 	switch args.subcommand {
 	case "history":
 		handleHistory(args.subArgs, store)
+	case "session-history":
+		handleSessionHistoryClear(args.subArgs, store)
 	case "briefing":
 		handleBriefing(args.subArgs, cfg, store)
 	case "init":
@@ -233,6 +236,39 @@ func handleSubcommand(args cliArgs, cfg *config.Config, store *memory.Store) {
 		fmt.Fprintf(os.Stderr, "❌ unknown subcommand: %s\n", args.subcommand)
 		os.Exit(1)
 	}
+}
+
+// handleSessionHistoryClear exposes memory.Store.PruneSessionLogs via the CLI
+// (orch session-history clear [days]). Without this, session_logs (written
+// on every REPL turn and every /pass) had no reachable cleanup path and grew
+// unbounded, unlike the sibling `history` table which has `orch history clear`.
+func handleSessionHistoryClear(subArgs []string, store *memory.Store) {
+	if store == nil {
+		fmt.Fprintf(os.Stderr, "❌ memory store not available\n")
+		os.Exit(1)
+	}
+
+	if len(subArgs) == 0 || subArgs[0] != "clear" {
+		fmt.Fprintf(os.Stderr, "Usage: orch session-history clear [older-than-days]\n")
+		os.Exit(1)
+	}
+
+	olderThanDays := 0
+	if len(subArgs) > 1 {
+		days, err := strconv.Atoi(subArgs[1])
+		if err != nil || days < 0 {
+			fmt.Fprintf(os.Stderr, "❌ invalid days value: %s\n", subArgs[1])
+			os.Exit(1)
+		}
+		olderThanDays = days
+	}
+
+	count, err := store.PruneSessionLogs(olderThanDays)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("🗑️  cleared %d session-history entries\n", count)
 }
 
 func handleHistory(subArgs []string, store *memory.Store) {
@@ -428,6 +464,7 @@ func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, st
 			e := executor.New(cfg, br)
 			e.EventChan = stepEvents
 			e.OutputEvents = outputEvents
+			e.ApprovalFunc = promptApproval
 			result := e.Execute(plan)
 
 			stepPrinterWg.Wait()
@@ -535,6 +572,7 @@ func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, st
 	e := executor.New(cfg, br)
 	e.EventChan = stepEvents
 	e.OutputEvents = outputEvents
+	e.ApprovalFunc = promptApproval
 
 	// re-plan callback
 	rePlanCount := 0
@@ -795,7 +833,7 @@ func parseArgs() cliArgs {
 
 	// Check for subcommands first
 	switch os.Args[1] {
-	case "history", "briefing", "init":
+	case "history", "session-history", "briefing", "init":
 		args.subcommand = os.Args[1]
 		if len(os.Args) > 2 {
 			args.subArgs = os.Args[2:]
@@ -850,6 +888,9 @@ Subcommands:
   orch history search <kw>   Search history
   orch history clear         Clear all history
 
+  orch session-history clear [days]   Clear session mode conversation logs
+                                       (all, or older than N days)
+
   orch briefing              Show current briefing
   orch briefing set <text>   Manually set briefing
   orch briefing gen          Auto-generate briefing from recent history via MLX
@@ -878,6 +919,62 @@ func toolNames(reg *registry.Registry) string {
 		names = append(names, t.Name)
 	}
 	return strings.Join(names, ", ")
+}
+
+// promptApprovalMu serializes concurrent approval prompts (DAG steps run in
+// their own goroutines; without this, two high-risk steps triggered at the
+// same time would interleave their prompts and race on stdin).
+var promptApprovalMu sync.Mutex
+
+// promptApproval asks the user to confirm execution of a high-risk command.
+// Returns true if user approves, false if denied.
+//
+// Non-interactive sessions (stdin is a pipe/redirect, e.g. CI/cron) cannot be
+// prompted — that case is detected explicitly and denied with a clear message
+// rather than silently blocking on a Scanln that will hit EOF. Set
+// ORCH_AUTO_APPROVE=1 to bypass the gate entirely in those environments.
+func promptApproval(command string) bool {
+	promptApprovalMu.Lock()
+	defer promptApprovalMu.Unlock()
+
+	if os.Getenv("ORCH_AUTO_APPROVE") == "1" {
+		fmt.Fprintf(os.Stderr, "⚠️  ORCH_AUTO_APPROVE=1: auto-approving high-risk command: %s\n", command)
+		return true
+	}
+
+	stat, _ := os.Stdin.Stat()
+	if stat != nil && (stat.Mode()&os.ModeCharDevice) == 0 {
+		fmt.Fprintf(os.Stderr, "\n⚠️  HIGH-RISK COMMAND DETECTED (non-interactive session, cannot prompt):\n")
+		fmt.Fprintf(os.Stderr, "   %s\n", command)
+		fmt.Fprintf(os.Stderr, "   Denied by default. Set ORCH_AUTO_APPROVE=1 to allow high-risk commands in CI/scripts.\n")
+		return false
+	}
+
+	fmt.Fprintf(os.Stderr, "\n⚠️  HIGH-RISK COMMAND DETECTED:\n")
+	fmt.Fprintf(os.Stderr, "   %s\n", command)
+	fmt.Fprintf(os.Stderr, "   Execute? [y/N]: ")
+
+	// Read the response off the main goroutine so Ctrl+C can interrupt a
+	// pending prompt instead of blocking forever on Scanln.
+	responseCh := make(chan string, 1)
+	go func() {
+		var response string
+		fmt.Scanln(&response)
+		responseCh <- response
+	}()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT)
+	defer signal.Stop(sigCh)
+
+	select {
+	case response := <-responseCh:
+		response = strings.TrimSpace(strings.ToLower(response))
+		return response == "y" || response == "yes"
+	case <-sigCh:
+		fmt.Fprintf(os.Stderr, "\n⚡ cancelled, denying command\n")
+		return false
+	}
 }
 
 func truncateStr(s string, max int) string {

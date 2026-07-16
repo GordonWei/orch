@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gordonwei/orch/pkg/backend"
 	"github.com/gordonwei/orch/pkg/config"
@@ -79,6 +80,11 @@ type Executor struct {
 	cfg        *config.Config
 	backendReg *backend.Registry
 	rePlanFunc func(failedContext string) error // callback to trigger re-plan
+
+	// ApprovalFunc, if set, is called before executing high-risk shell commands.
+	// It receives the command string and returns true if the user approves execution.
+	// If nil, all commands execute without approval.
+	ApprovalFunc func(command string) bool
 
 	// EventChan, if set (non-nil), emits step lifecycle events (start/done/failed) during execution.
 	// The caller must create the channel before calling Execute(); Execute() closes it when done.
@@ -534,11 +540,23 @@ func (e *Executor) runStep(step planner.Step, priorContext string) (string, erro
 		if step.Command == "" {
 			return "", fmt.Errorf("shell step has no command")
 		}
+		// Approval gate: check if command is high-risk
+		if e.ApprovalFunc != nil && e.isHighRiskCommand(step.Command) {
+			if !e.ApprovalFunc(step.Command) {
+				return "", fmt.Errorf("user denied execution of high-risk command")
+			}
+		}
 		cmd = exec.CommandContext(ctx, "bash", "-c", step.Command)
 
 	default:
 		// Run directly as shell command (terraform, kubectl, helm, aws, gcloud)
 		if step.Command != "" {
+			// Approval gate: check if command is high-risk
+			if e.ApprovalFunc != nil && e.isHighRiskCommand(step.Command) {
+				if !e.ApprovalFunc(step.Command) {
+					return "", fmt.Errorf("user denied execution of high-risk command")
+				}
+			}
 			cmd = exec.CommandContext(ctx, "bash", "-c", step.Command)
 		} else if step.Prompt != "" {
 			// No command but has prompt — delegate to primary backend
@@ -706,12 +724,33 @@ func (e *Executor) findWorkDir(step planner.Step) string {
 }
 
 // truncate truncates an overly long string.
-func truncate(s string, max int) string {
+// TruncateWithSuffix trims s to at most max bytes, cutting on a UTF-8 rune
+// boundary so multi-byte characters (e.g. Traditional Chinese) are never
+// split into invalid UTF-8, then appends suffix. Exported so callers outside
+// this package (e.g. cmd/orch) can reuse the same safe truncation instead of
+// each slicing strings by byte index independently.
+func TruncateWithSuffix(s string, max int, suffix string) string {
 	s = strings.TrimSpace(s)
 	if len(s) <= max {
 		return s
 	}
-	return s[:max] + "\n... (truncated)"
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + suffix
+}
+
+// Truncate is TruncateWithSuffix with this package's conventional
+// "\n... (truncated)" marker.
+func Truncate(s string, max int) string {
+	return TruncateWithSuffix(s, max, "\n... (truncated)")
+}
+
+// truncate is the package-internal alias for Truncate, kept so existing
+// call sites within this package don't need the package-qualified name.
+func truncate(s string, max int) string {
+	return Truncate(s, max)
 }
 
 // parseFiles extracts file declarations from step output.
@@ -752,4 +791,28 @@ func parseKV(output string) map[string]string {
 		return nil
 	}
 	return kv
+}
+
+// ===== Approval Gate =====
+
+// isHighRiskCommand checks whether a command matches any high-risk pattern.
+// The pattern list comes from e.cfg.HighRiskPatterns (config-driven, see
+// pkg/config.Config.HighRiskPatterns) instead of a hardcoded package-level
+// list, so users can add/replace patterns via config.yaml without a rebuild
+// — the same config-driven approach pkg/router already uses for route rules.
+// Falls back to config.DefaultHighRiskPatterns() if cfg or the list is unset
+// (e.g. an Executor built without going through config.Load()).
+func (e *Executor) isHighRiskCommand(command string) bool {
+	patterns := config.DefaultHighRiskPatterns()
+	if e.cfg != nil && len(e.cfg.HighRiskPatterns) > 0 {
+		patterns = e.cfg.HighRiskPatterns
+	}
+
+	lower := strings.ToLower(command)
+	for _, pattern := range patterns {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	return false
 }

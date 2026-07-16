@@ -177,6 +177,13 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br
 			// Record input for history analysis
 			rt.RecordInput(input, sm.ActiveBackend())
 
+			// Persist user input to session logs
+			if store != nil {
+				if err := store.AddSessionLog(string(sm.ActiveBackend()), "user", input); err != nil {
+					fmt.Fprintf(os.Stderr, "⚠️  failed to persist session log: %v\n", err)
+				}
+			}
+
 			if err := sess.Send(input); err != nil {
 				fmt.Fprintf(os.Stderr, "❌ send failed: %v\n", err)
 				continue
@@ -184,20 +191,26 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br
 
 			// Stream response chunks as they arrive (real-time output)
 			stream := sess.ReadStream()
-			gotOutput := false
+			var sessionOutputBuf strings.Builder
 			for chunk := range stream {
 				if chunk != "" {
 					fmt.Print(chunk)
-					gotOutput = true
+					sessionOutputBuf.WriteString(chunk)
 				}
 			}
-			if gotOutput {
+			if sessionOutputBuf.Len() > 0 {
 				// Ensure trailing newline
 				raw := sess.ReadRaw()
 				if raw != "" && !strings.HasSuffix(raw, "\n") {
 					fmt.Println()
 				}
 				sm.TouchOutput(sm.ActiveBackend())
+				// Persist assistant output to session logs
+				if store != nil {
+					if err := store.AddSessionLog(string(sm.ActiveBackend()), "assistant", sessionOutputBuf.String()); err != nil {
+						fmt.Fprintf(os.Stderr, "⚠️  failed to persist session log: %v\n", err)
+					}
+				}
 			}
 			continue
 		}
@@ -281,6 +294,12 @@ func handleSlashCommand(rl *readline.Instance, reg *registry.Registry, cfg *conf
 
 	case "/auto":
 		handleAutoCmd(rt, args)
+
+	case "/pass":
+		handlePassCmd(sm, store, args)
+
+	case "/session-history", "/sh":
+		handleSessionHistoryCmd(store, sm, args)
 
 	case "/w", "/workflows":
 		if len(args) > 0 {
@@ -479,6 +498,179 @@ func handleAutoCmd(rt *router.Router, args []string) {
 	}
 }
 
+// --- Pass command (cross-session context transfer) ---
+
+func handlePassCmd(sm *SessionManager, store *memory.Store, args []string) {
+	if store == nil {
+		fmt.Fprintf(os.Stderr, "❌ memory store not available\n")
+		return
+	}
+
+	if len(args) == 0 {
+		fmt.Fprintf(os.Stderr, "Usage: /pass <backend> — pass last output from current session to target\n")
+		fmt.Fprintf(os.Stderr, "       /pass <from> <to> — pass last output from <from> to <to>\n")
+		return
+	}
+
+	var fromBackend, toBackend session.Backend
+
+	if len(args) == 1 {
+		// /pass <target> — current session → target
+		if !sm.HasActive() {
+			fmt.Fprintf(os.Stderr, "❌ no active session. Use /pass <from> <to> in normal mode\n")
+			return
+		}
+		fromBackend = sm.ActiveBackend()
+		toBackend = parseBackend(args[0])
+	} else {
+		// /pass <from> <to>
+		fromBackend = parseBackend(args[0])
+		toBackend = parseBackend(args[1])
+	}
+
+	if fromBackend == "" {
+		fmt.Fprintf(os.Stderr, "❌ invalid source backend: %s\n", args[0])
+		return
+	}
+	if toBackend == "" {
+		target := args[0]
+		if len(args) > 1 {
+			target = args[1]
+		}
+		fmt.Fprintf(os.Stderr, "❌ invalid target backend: %s\n", target)
+		return
+	}
+	if fromBackend == toBackend {
+		fmt.Fprintf(os.Stderr, "❌ source and target are the same\n")
+		return
+	}
+
+	// Get last output from source
+	lastOutput, err := store.LastSessionOutput(string(fromBackend))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ failed to read session log: %v\n", err)
+		return
+	}
+	if lastOutput == "" {
+		fmt.Fprintf(os.Stderr, "❌ no output from %s to pass\n", fromBackend)
+		return
+	}
+
+	// Truncate if too long (rune-safe — avoid splitting multi-byte UTF-8 chars)
+	if len(lastOutput) > 8000 {
+		lastOutput = executor.Truncate(lastOutput, 8000)
+	}
+
+	// Ensure target session exists
+	targetSess := sm.Get(toBackend)
+	if targetSess == nil {
+		fmt.Fprintf(os.Stderr, "⚠️  %s session not running, spawning...\n", toBackend)
+		if err := sm.SpawnOrSwitch(toBackend); err != nil {
+			fmt.Fprintf(os.Stderr, "❌ failed to spawn %s: %v\n", toBackend, err)
+			return
+		}
+		time.Sleep(2 * time.Second)
+		targetSess = sm.Active()
+		if targetSess == nil {
+			fmt.Fprintf(os.Stderr, "❌ %s session not available\n", toBackend)
+			return
+		}
+		// Drain banner
+		banner := targetSess.ReadRaw()
+		if banner != "" {
+			fmt.Print(banner)
+			if !strings.HasSuffix(banner, "\n") {
+				fmt.Println()
+			}
+		}
+	} else {
+		// Switch to target
+		sm.Switch(toBackend)
+	}
+
+	// Send context as a prefixed message
+	contextMsg := fmt.Sprintf("[Context passed from %s session]\n%s\n[End of passed context]\n\nPlease acknowledge you received the above context.", fromBackend, lastOutput)
+	if err := targetSess.Send(contextMsg); err != nil {
+		fmt.Fprintf(os.Stderr, "❌ failed to send context to %s: %v\n", toBackend, err)
+		return
+	}
+
+	// Persist the pass action
+	if err := store.AddSessionLog(string(toBackend), "user", contextMsg); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠️  failed to persist session log: %v\n", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "✅ passed %d chars from %s → %s (now in %s session)\n",
+		len(lastOutput), fromBackend, toBackend, toBackend)
+
+	// Stream the target's response
+	stream := targetSess.ReadStream()
+	var buf strings.Builder
+	for chunk := range stream {
+		if chunk != "" {
+			fmt.Print(chunk)
+			buf.WriteString(chunk)
+		}
+	}
+	if buf.Len() > 0 {
+		raw := targetSess.ReadRaw()
+		if raw != "" && !strings.HasSuffix(raw, "\n") {
+			fmt.Println()
+		}
+		sm.TouchOutput(toBackend)
+		if err := store.AddSessionLog(string(toBackend), "assistant", buf.String()); err != nil {
+			fmt.Fprintf(os.Stderr, "⚠️  failed to persist session log: %v\n", err)
+		}
+	}
+}
+
+// --- Session history command ---
+
+func handleSessionHistoryCmd(store *memory.Store, sm *SessionManager, args []string) {
+	if store == nil {
+		fmt.Fprintf(os.Stderr, "❌ memory store not available\n")
+		return
+	}
+
+	var backend string
+	if len(args) > 0 {
+		b := parseBackend(args[0])
+		if b == "" {
+			fmt.Fprintf(os.Stderr, "❌ unsupported backend: %s\n", args[0])
+			return
+		}
+		backend = string(b)
+	} else if sm.HasActive() {
+		backend = string(sm.ActiveBackend())
+	} else {
+		fmt.Fprintf(os.Stderr, "Usage: /session-history <claude|kiro|gemini>\n")
+		return
+	}
+
+	entries, err := store.RecentSessionLogs(backend, 20)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ failed to read session logs: %v\n", err)
+		return
+	}
+	if len(entries) == 0 {
+		fmt.Fprintf(os.Stderr, "📜 no session logs for %s\n", backend)
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "📜 session history (%s, last %d entries):\n", backend, len(entries))
+	for _, e := range entries {
+		icon := "👤"
+		if e.Role == "assistant" {
+			icon = "🤖"
+		}
+		content := executor.TruncateWithSuffix(e.Content, 120, "...")
+		// Replace newlines for display
+		content = strings.ReplaceAll(content, "\n", " ↵ ")
+		fmt.Fprintf(os.Stderr, "  %s [%s] %s\n", icon, e.Timestamp, content)
+	}
+	fmt.Fprintln(os.Stderr)
+}
+
 // --- Help ---
 
 func printREPLHelp(sm *SessionManager) {
@@ -486,13 +678,16 @@ func printREPLHelp(sm *SessionManager) {
 📖 REPL Commands:
 
   Session Mode:
-    /session <claude|kiro>  — start or attach to a backend session
-    /switch <claude|kiro>   — switch between running sessions
-    /sessions               — list all running sessions
-    /back                   — return to normal mode (session stays alive)
-    /kill [backend|all]     — terminate a session
-    /auto [on|off]          — toggle auto-route (strong keywords auto-switch)
-    Ctrl+C                  — same as /back
+    /session <claude|kiro|gemini>  — start or attach to a backend session
+    /switch <claude|kiro|gemini>   — switch between running sessions
+    /sessions                      — list all running sessions
+    /back                          — return to normal mode (session stays alive)
+    /kill [backend|all]            — terminate a session
+    /auto [on|off]                 — toggle auto-route (strong keywords auto-switch)
+    /pass <target>                 — pass last output from current session to target
+    /pass <from> <to>             — pass last output between sessions
+    /sh, /session-history [backend] — show recent session conversation
+    Ctrl+C                         — same as /back
 
   Normal Mode:
     /w, /workflows          — list all available workflows
@@ -585,6 +780,7 @@ func handleWorkflowExec(rl *readline.Instance, reg *registry.Registry, cfg *conf
 	e := executor.New(cfg, br)
 	e.EventChan = stepEvents
 	e.OutputEvents = outputEvents
+	e.ApprovalFunc = promptApproval
 
 	result := e.Execute(plan)
 

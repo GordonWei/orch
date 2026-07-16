@@ -199,8 +199,8 @@ func (r *Router) Hint(input string, currentBackend session.Backend) HintResult {
 			continue
 		}
 
-		// Check if pattern matches (substring match)
-		if !strings.Contains(lower, rule.Pattern) {
+		// Check if pattern matches
+		if !ruleMatches(lower, rule) {
 			continue
 		}
 
@@ -235,6 +235,20 @@ func (r *Router) Hint(input string, currentBackend session.Backend) HintResult {
 // SuggestBackend returns the best backend for the given input based on keyword/phrase
 // match strength combined with history momentum. Returns empty backend and reason if
 // no strong suggestion can be made.
+// ruleMatches reports whether input contains rule.Pattern. For "keyword"
+// rules with an ASCII-only pattern, it requires a whole-word match (so
+// "drive" doesn't fire on "test drive"/"hard drive"/"OneDrive") — the same
+// word-boundary check already used for workflow triggers. CJK patterns have
+// no reliable word-boundary concept and "phrase"/other rule types keep the
+// original plain substring match, since multi-word phrases are already
+// specific enough that mid-word false positives aren't a real risk.
+func ruleMatches(lower string, rule *config.RouteRule) bool {
+	if rule.Type == "keyword" && config.IsASCIIOnly(rule.Pattern) {
+		return config.ContainsWholeWord(lower, rule.Pattern)
+	}
+	return strings.Contains(lower, rule.Pattern)
+}
+
 func (r *Router) SuggestBackend(input string) (session.Backend, string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -252,7 +266,7 @@ func (r *Router) SuggestBackend(input string) (session.Backend, string) {
 		if rule.Type != "phrase" && rule.Type != "keyword" {
 			continue
 		}
-		if !strings.Contains(lower, rule.Pattern) {
+		if !ruleMatches(lower, rule) {
 			continue
 		}
 		target := session.Backend(rule.Target)

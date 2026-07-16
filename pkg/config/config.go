@@ -8,6 +8,47 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// IsASCIIOnly reports whether s contains only ASCII bytes.
+func IsASCIIOnly(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
+// isAlnum reports whether b is an ASCII letter or digit.
+func isAlnum(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+}
+
+// ContainsWholeWord reports whether needle appears in haystack with
+// non-alphanumeric (or string-boundary) characters on both sides — it still
+// matches "status" inside "check cluster status", but not inside
+// "statusbar" or "gitstatus". Only meaningful for ASCII needles/haystacks
+// (CJK text has no reliable word-boundary concept); callers should guard
+// with IsASCIIOnly first and fall back to plain strings.Contains otherwise.
+func ContainsWholeWord(haystack, needle string) bool {
+	start := 0
+	for {
+		idx := strings.Index(haystack[start:], needle)
+		if idx == -1 {
+			return false
+		}
+		idx += start
+
+		beforeOK := idx == 0 || !isAlnum(haystack[idx-1])
+		afterIdx := idx + len(needle)
+		afterOK := afterIdx >= len(haystack) || !isAlnum(haystack[afterIdx])
+
+		if beforeOK && afterOK {
+			return true
+		}
+		start = idx + 1
+	}
+}
+
 // RouteRule defines a single routing rule: a pattern that maps to a target backend.
 type RouteRule struct {
 	Pattern  string `yaml:"pattern"`
@@ -19,21 +60,27 @@ type RouteRule struct {
 // RouteRulesConfig holds the unified routing configuration.
 type RouteRulesConfig struct {
 	Rules       []RouteRule `yaml:"rules"`
-	Cooldown    int         `yaml:"cooldown"`      // min inputs between hints
-	AutoRoute   bool        `yaml:"auto_route"`    // auto-spawn+switch
-	HistorySize int         `yaml:"history_size"`  // context-aware window
+	Cooldown    int         `yaml:"cooldown"`     // min inputs between hints
+	AutoRoute   bool        `yaml:"auto_route"`   // auto-spawn+switch
+	HistorySize int         `yaml:"history_size"` // context-aware window
 }
 
 type Config struct {
-	Persona          Persona             `yaml:"persona"`
-	AIBackend        AIBackendConfig     `yaml:"ai_backend"`
-	LocalLLM         LocalLLM            `yaml:"local_llm"`
-	Models           []ModelDef          `yaml:"models"`
-	Memory           MemoryConfig        `yaml:"memory"`
-	Workflows        WorkflowConfig      `yaml:"workflows"`
-	Workspace        Workspace           `yaml:"workspace"`
-	KeywordShortcuts []KeywordShortcut   `yaml:"keyword_shortcuts"`
-	RouteRules       RouteRulesConfig    `yaml:"route_rules"`
+	Persona          Persona           `yaml:"persona"`
+	AIBackend        AIBackendConfig   `yaml:"ai_backend"`
+	LocalLLM         LocalLLM          `yaml:"local_llm"`
+	Models           []ModelDef        `yaml:"models"`
+	Memory           MemoryConfig      `yaml:"memory"`
+	Workflows        WorkflowConfig    `yaml:"workflows"`
+	Workspace        Workspace         `yaml:"workspace"`
+	KeywordShortcuts []KeywordShortcut `yaml:"keyword_shortcuts"`
+	RouteRules       RouteRulesConfig  `yaml:"route_rules"`
+
+	// HighRiskPatterns lists substrings that, when found in a shell step's
+	// command, trigger the executor's approval gate (see pkg/executor).
+	// Ships with a sensible default list (see defaultConfig); set this key
+	// in config.yaml to add or replace patterns without a rebuild.
+	HighRiskPatterns []string `yaml:"high_risk_patterns"`
 }
 
 // AIBackendConfig defines which AI CLI backend to use for cloud planning/execution.
@@ -64,10 +111,10 @@ type LocalLLM struct {
 
 // ModelDef defines a switchable model backend.
 type ModelDef struct {
-	Name       string `yaml:"name"`       // display name, e.g., "qwen-3b", "llama-8b"
-	Backend    string `yaml:"backend"`    // "mlx", "ollama", "openai-compatible"
-	Endpoint   string `yaml:"endpoint"`   // API endpoint URL
-	Model      string `yaml:"model"`      // model identifier for the API
+	Name       string `yaml:"name"`                  // display name, e.g., "qwen-3b", "llama-8b"
+	Backend    string `yaml:"backend"`               // "mlx", "ollama", "openai-compatible"
+	Endpoint   string `yaml:"endpoint"`              // API endpoint URL
+	Model      string `yaml:"model"`                 // model identifier for the API
 	PythonPath string `yaml:"python_path,omitempty"` // only for mlx backend
 	AutoStart  bool   `yaml:"auto_start,omitempty"`
 	Port       string `yaml:"port,omitempty"`
@@ -79,7 +126,7 @@ type MemoryConfig struct {
 	DBPath         string `yaml:"db_path"`          // path to orch.db, default ~/.config/orch/orch.db
 	BriefingOnBoot bool   `yaml:"briefing_on_boot"` // load briefing into context on start
 	AutoSummarize  bool   `yaml:"auto_summarize"`   // MLX summarize after each task
-	HistoryLimit   int    `yaml:"history_limit"`     // max rows before pruning (0=unlimited)
+	HistoryLimit   int    `yaml:"history_limit"`    // max rows before pruning (0=unlimited)
 }
 
 type Workspace struct {
@@ -219,7 +266,59 @@ Response rules:
 			{Prefix: "gcloud compute", Category: "query"},
 			{Prefix: "gcloud container", Category: "query"},
 		},
-		RouteRules: defaultRouteRules(),
+		RouteRules:       defaultRouteRules(),
+		HighRiskPatterns: DefaultHighRiskPatterns(),
+	}
+}
+
+// DefaultHighRiskPatterns returns the built-in list of substrings that
+// trigger the executor's approval gate. Set high_risk_patterns in
+// config.yaml to override this list entirely (yaml.Unmarshal replaces the
+// whole slice, same merge behavior as route_rules). Exported so callers that
+// construct a Config without going through Load() (e.g. tests) can still
+// get a sane fallback.
+func DefaultHighRiskPatterns() []string {
+	return []string{
+		// Terraform destructive
+		"terraform apply",
+		"terraform destroy",
+		"tf apply",
+		"tf destroy",
+		"tofu apply",
+		"tofu destroy",
+		// Kubernetes destructive
+		"kubectl delete",
+		"kubectl drain",
+		"kubectl cordon",
+		// File system destructive
+		"rm -rf",
+		"rm -r",
+		"rmdir",
+		// Git destructive
+		"git push --force",
+		"git push -f",
+		"git reset --hard",
+		"git clean -f",
+		// Docker destructive
+		"docker rm",
+		"docker rmi",
+		"docker system prune",
+		// Helm destructive
+		"helm uninstall",
+		"helm delete",
+		// AWS destructive
+		"aws s3 rm",
+		"aws ec2 terminate",
+		"aws rds delete",
+		"aws cloudformation delete",
+		// GCP destructive
+		"gcloud compute instances delete",
+		"gcloud container clusters delete",
+		"gcloud sql instances delete",
+		// Database
+		"drop database",
+		"drop table",
+		"truncate table",
 	}
 }
 
@@ -348,7 +447,12 @@ func defaultRouteRules() RouteRulesConfig {
 
 			// Gemini keywords — strong (strength 3)
 			{Pattern: "gemini", Target: "gemini", Strength: 3, Type: "keyword"},
-			{Pattern: "drive", Target: "gemini", Strength: 3, Type: "keyword"},
+			// "drive" alone is too ambiguous as a keyword (hard drive, test drive,
+			// disk drive, sales drive are all common phrases unrelated to Google
+			// Drive) — word-boundary matching alone doesn't fix this since "drive"
+			// really is a standalone word in those phrases too. Use the specific
+			// "google drive" phrase instead.
+			{Pattern: "google drive", Target: "gemini", Strength: 3, Type: "phrase"},
 			{Pattern: "研究", Target: "gemini", Strength: 3, Type: "keyword"},
 
 			// Gemini keywords — medium (strength 2)
