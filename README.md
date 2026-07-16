@@ -545,6 +545,8 @@ The architecture now supports a second backend type: stateless HTTP API backends
 - **`/pass` extended for API backends** — `/pass claude bedrock` or `/pass kiro vertexai` now works. When the target is a stateless API backend, context is stored in `session_logs` (not sent via PTY). The next API call picks up this stored context as conversation history.
 - **Registry API backend detection** — New `CheckBedrockCredentials(region)` and `CheckVertexAICredentials()` in `pkg/registry` that validate credentials without making billable calls. Startup prints availability status for enabled API backends.
 - **Route rule targeting** — Existing `route_rules` can now use `target: bedrock` or `target: vertexai` to route patterns to API backends directly.
+- **Interactive streaming session mode (`/session bedrock`, `/session vertexai`)** — API backends can now be used in session mode just like CLI backends. Type `/session bedrock` to get a `bedrock›` prompt with real-time streaming responses (Bedrock uses `ConverseStream` API, Vertex AI uses SSE `streamGenerateContent`). Conversation history accumulates across turns within the session. Internally uses a new `APISession` adapter that implements the same `SessionLike` interface as PTY sessions, so all session commands (`/sessions`, `/switch`, `/kill`, `/pass`) work uniformly.
+- **Race-safe APISession** — The streaming session's concurrent Send/Kill handling was reviewed and hardened: each stream goroutine exclusively owns its output channel (only it closes it), cancellation propagates via `context.Context`, and 5 regression tests (`-race` verified) cover the exact scenarios that historically caused panics in PTY sessions.
 
 ### v0.15.0 (2026-07-16)
 

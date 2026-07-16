@@ -163,7 +163,19 @@ claude› /kill all         # terminate everything
 ›                         # back to normal
 ```
 
-Shorthand: `c` = claude, `k` = kiro (e.g., `/session c`)
+Shorthand: `c` = claude, `k` = kiro, `br` = bedrock, `va` = vertexai (e.g., `/session c`)
+
+**API Backend Sessions (v0.16+)**: Bedrock and Vertex AI can also be used in session mode:
+
+```bash
+› /session bedrock        # start API streaming session
+bedrock› translate this to Japanese   # real-time streaming response
+bedrock› /pass bedrock claude         # pass context to claude
+bedrock› /switch claude
+claude› ...
+```
+
+Unlike PTY sessions (which spawn a CLI process), API sessions use streaming HTTP calls (`ConverseStream` / `streamGenerateContent`). Conversation history accumulates within the session. Requires `api_backends.bedrock.enabled: true` (or `vertexai`) in config with valid credentials.
 
 **Route Hints (v0.10+)**: When in a session, orch detects if your input matches another backend's domain and suggests switching:
 
