@@ -49,7 +49,7 @@ orch                            # enter REPL
 
 Features:
 - **Session context**: 5-turn sliding window, backends see prior conversation
-- **Slash commands**: `/w` workflows, `/h` history, `/b` briefing, `/help`
+- **Slash commands**: `/w` workflows, `/h` history, `/b` briefing, `/sh` session-history, `/pass` context transfer, `/help`
 - **No stdout capture hack**: `runTask` no longer redirects `os.Stdout` through an `os.Pipe()`.
   `runTask` is the single place that prints task output — right after execution and *before*
   event-bus chains run, so the result is never delayed behind a slow cloud chain. The output
@@ -88,6 +88,45 @@ claude› terraform plan for litellm-gke
 - `/auto [on|off]`: toggle auto-switching (strong signals auto-switch when enabled)
 
 **Streaming Output (v0.11.1+)**: Session responses stream in real-time (no more blocking until idle). If output appears truncated during `Ctrl+C` shutdown, this is expected behavior — the stream channel closes as part of graceful teardown.
+
+**Session Persistence (v0.15+)**: All session conversations are automatically persisted to SQLite (`session_logs` table). Survives session kills and orch restarts.
+
+```
+› /sh claude              # show last 20 entries for claude session
+› /session-history kiro   # long form
+
+$ orch session-history clear         # wipe all entries
+$ orch session-history clear 30      # wipe entries older than 30 days
+```
+
+Truncation for display/transfer (`/pass`, `/sh`) is rune-safe (`executor.TruncateWithSuffix`) — it won't split a multi-byte UTF-8 character, which matters given how much Traditional Chinese passes through this tool.
+
+**Cross-Session Context Passing (v0.15+)**: Transfer the last assistant output from one session to another:
+
+```
+claude› /pass kiro        # pass claude's last output → kiro session
+› /pass claude kiro       # explicit: from claude to kiro (works in normal mode too)
+```
+
+The passed context is wrapped in `[Context passed from X session]` markers and the target session streams its acknowledgment. Automatically spawns the target session if not running.
+
+**Approval Gate (v0.15+)**: The DAG executor checks shell commands against high-risk patterns before execution — applied to **both** `/w` workflow execution and normal task execution:
+
+```
+⚠️  HIGH-RISK COMMAND DETECTED:
+   terraform apply -auto-approve
+   Execute? [y/N]:
+```
+
+Covers 40+ patterns by default (`terraform apply/destroy`, `kubectl delete/drain`, `rm -rf`, `git push --force`, `docker system prune`, AWS/GCP delete operations, SQL `DROP`/`TRUNCATE`, ...). Set `high_risk_patterns` in `config.yaml` to add/replace patterns without a rebuild.
+
+Concurrent high-risk steps in the same DAG serialize their approval prompts (no stdin race). Ctrl+C during a pending prompt cancels it (denies the command) instead of hanging.
+
+**Non-interactive/CI use**: piped/non-TTY stdin can't be prompted — the gate denies by default with a clear message instead of silently blocking. Set `ORCH_AUTO_APPROVE=1` to bypass the gate entirely (e.g. in CI/cron):
+
+```
+ORCH_AUTO_APPROVE=1 orch "terraform apply for litellm-gke"
+```
 
 **Session Health (v0.10+)**:
 - `WatchSessions()` monitors session health in background (2s interval)
