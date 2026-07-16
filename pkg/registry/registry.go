@@ -1,10 +1,15 @@
 package registry
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
+
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"golang.org/x/oauth2/google"
 )
 
 type Tool struct {
@@ -165,4 +170,65 @@ func readJSONField(path, field string) string {
 		}
 	}
 	return ""
+}
+
+// ===== API Backend Availability Detection =====
+
+// APIBackendStatus reports the availability of a stateless API backend.
+type APIBackendStatus struct {
+	Name      string `json:"name"`
+	Available bool   `json:"available"`
+	Reason    string `json:"reason,omitempty"`
+}
+
+// CheckBedrockCredentials checks if AWS credentials are available for Bedrock.
+func CheckBedrockCredentials(region string) APIBackendStatus {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if region == "" {
+		region = "us-east-1"
+	}
+
+	_, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(region))
+	if err != nil {
+		return APIBackendStatus{
+			Name:      "bedrock",
+			Available: false,
+			Reason:    "AWS credentials not found: " + err.Error(),
+		}
+	}
+
+	return APIBackendStatus{
+		Name:      "bedrock",
+		Available: true,
+	}
+}
+
+// CheckVertexAICredentials checks if GCP Application Default Credentials are available.
+func CheckVertexAICredentials() APIBackendStatus {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := google.FindDefaultCredentials(ctx, "https://www.googleapis.com/auth/cloud-platform")
+	if err != nil {
+		return APIBackendStatus{
+			Name:      "vertexai",
+			Available: false,
+			Reason:    "GCP ADC not found: " + err.Error(),
+		}
+	}
+
+	return APIBackendStatus{
+		Name:      "vertexai",
+		Available: true,
+	}
+}
+
+// ScanAPIBackends checks all API backend credentials and returns their status.
+func ScanAPIBackends(bedrockRegion string) []APIBackendStatus {
+	return []APIBackendStatus{
+		CheckBedrockCredentials(bedrockRegion),
+		CheckVertexAICredentials(),
+	}
 }

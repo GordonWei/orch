@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gordonwei/orch/pkg/apibackend"
 	"github.com/gordonwei/orch/pkg/backend"
 	"github.com/gordonwei/orch/pkg/config"
 	"github.com/gordonwei/orch/pkg/eventbus"
@@ -129,6 +130,34 @@ func main() {
 		fmt.Fprintf(os.Stderr, "⚠️  no AI backends detected (install kiro-cli, claude, or gemini for cloud planning)\n")
 	}
 
+	// Initialize stateless API backends (Bedrock, Vertex AI)
+	apiBackends := make(map[string]apibackend.APIBackend)
+	if cfg.APIBackends.Bedrock.Enabled {
+		ab := apibackend.NewBedrock(apibackend.BedrockConfig{
+			Region:  cfg.APIBackends.Bedrock.Region,
+			ModelID: cfg.APIBackends.Bedrock.ModelID,
+		})
+		apiBackends["bedrock"] = ab
+		if ab.Available() {
+			fmt.Fprintf(os.Stderr, "   ☁️  bedrock: %s (%s) ✓\n", cfg.APIBackends.Bedrock.ModelID, cfg.APIBackends.Bedrock.Region)
+		} else {
+			fmt.Fprintf(os.Stderr, "   ⚠️  bedrock: enabled but credentials not found\n")
+		}
+	}
+	if cfg.APIBackends.VertexAI.Enabled {
+		vab := apibackend.NewVertexAI(apibackend.VertexAIConfig{
+			ProjectID: cfg.APIBackends.VertexAI.ProjectID,
+			Region:    cfg.APIBackends.VertexAI.Region,
+			ModelID:   cfg.APIBackends.VertexAI.ModelID,
+		})
+		apiBackends["vertexai"] = vab
+		if vab.Available() {
+			fmt.Fprintf(os.Stderr, "   ☁️  vertexai: %s (%s/%s) ✓\n", cfg.APIBackends.VertexAI.ModelID, cfg.APIBackends.VertexAI.ProjectID, cfg.APIBackends.VertexAI.Region)
+		} else {
+			fmt.Fprintf(os.Stderr, "   ⚠️  vertexai: enabled but ADC not found\n")
+		}
+	}
+
 	// Auto-start MLX server (if not running)
 	activeModel := cfg.ActiveModel()
 	if activeModel.AutoStart {
@@ -197,7 +226,7 @@ func main() {
 		}
 
 		// runTask prints the output itself; the returned string is only for REPL session context.
-		ok, _ := runTask(ctx, reg, cfg, store, br, bus, prompt, args.dryRun)
+		ok, _ := runTask(ctx, reg, cfg, store, br, apiBackends, bus, prompt, args.dryRun)
 		if !ok {
 			os.Exit(1)
 		}
@@ -217,7 +246,7 @@ func main() {
 		replBus = eventbus.New(replRules)
 	}
 
-	runREPL(reg, cfg, store, br, replBus)
+	runREPL(reg, cfg, store, br, apiBackends, replBus)
 }
 
 // ===== Subcommand Handlers =====
@@ -230,6 +259,8 @@ func handleSubcommand(args cliArgs, cfg *config.Config, store *memory.Store) {
 		handleSessionHistoryClear(args.subArgs, store)
 	case "briefing":
 		handleBriefing(args.subArgs, cfg, store)
+	case "cost":
+		handleCostCmd(store, args.subArgs)
 	case "init":
 		handleInit()
 	default:
@@ -438,7 +469,7 @@ Output only the briefing text, no titles or formatting.`, sb.String())
 
 // ===== Task Execution =====
 
-func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry, bus *eventbus.Bus, prompt string, dryRun bool) (bool, string) {
+func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry, apiBackends map[string]apibackend.APIBackend, bus *eventbus.Bus, prompt string, dryRun bool) (bool, string) {
 	// 0. Workflow trigger match — check before AI planning
 	if workflows, err := workflow.LoadAll(cfg.Workflows.Dir); err == nil && len(workflows) > 0 {
 		if matched := workflow.Match(prompt, workflows); matched != nil {
@@ -465,6 +496,8 @@ func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, st
 			e.EventChan = stepEvents
 			e.OutputEvents = outputEvents
 			e.ApprovalFunc = promptApproval
+			e.APIBackends = apiBackends
+			e.MemoryStore = store
 			result := e.Execute(plan)
 
 			stepPrinterWg.Wait()
@@ -573,6 +606,8 @@ func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, st
 	e.EventChan = stepEvents
 	e.OutputEvents = outputEvents
 	e.ApprovalFunc = promptApproval
+	e.APIBackends = apiBackends
+	e.MemoryStore = store
 
 	// re-plan callback
 	rePlanCount := 0
@@ -833,7 +868,7 @@ func parseArgs() cliArgs {
 
 	// Check for subcommands first
 	switch os.Args[1] {
-	case "history", "session-history", "briefing", "init":
+	case "history", "session-history", "briefing", "cost", "init":
 		args.subcommand = os.Args[1]
 		if len(os.Args) > 2 {
 			args.subArgs = os.Args[2:]

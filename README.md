@@ -529,6 +529,23 @@ npm install -g @anthropic-ai/gemini  # or: brew install gemini
 
 ## Changelog
 
+### v0.16.0 (2026-07-17)
+
+**Bedrock + Vertex AI Stateless API Backends — direct cloud model invocation with real cost tracking.**
+
+The architecture now supports a second backend type: stateless HTTP API backends. Unlike the existing CLI-based PTY adapters (kiro/claude/gemini that spawn interactive processes), API backends make one-shot HTTP calls to cloud model APIs and return structured responses with token usage metadata.
+
+- **New `pkg/apibackend/` package** — Defines the `APIBackend` interface (`Name()`, `Available()`, `Invoke(ctx, Request) (*Response, error)`), with `Request` (prompt, messages, max_tokens, temperature), `Response` (content, input/output tokens, model, stop_reason, latency), and `Message` structs for multi-turn context.
+- **Bedrock adapter** — Calls AWS Bedrock Runtime `Converse` API using AWS SDK v2. Supports the standard credential chain (env vars / `~/.aws/credentials` / SSO profile). Model ID configurable in `config.yaml` (default: `anthropic.claude-3-5-sonnet-20241022-v2:0`). `Available()` validates credentials without making a billable API call.
+- **Vertex AI adapter** — Calls Google Vertex AI `generateContent` REST endpoint with ADC (Application Default Credentials) via `golang.org/x/oauth2/google`. Model ID configurable (default: `gemini-2.0-flash`). Lightweight: no heavy GCP client libraries, just HTTP + ADC token.
+- **Config-driven activation** — New `api_backends:` section in `config.yaml` with `bedrock:` and `vertexai:` sub-blocks (enabled, region, model_id, project_id). Disabled by default; enable by setting `enabled: true` and ensuring credentials are available. Bedrock default model: `us.anthropic.claude-sonnet-4-20250514-v1:0` (inference profile format, required for newer Bedrock models).
+- **Executor integration** — `runStep()` now handles `agent: "bedrock"` and `agent: "vertexai"` in the DAG step definition. Routes to stateless API call instead of PTY session, with automatic token usage recording.
+- **Cost tracking (`orch cost`)** — New subcommand that queries the `api_usage` SQLite table and displays aggregated statistics. Sub-commands: `orch cost` (all-time summary), `orch cost recent` (last 20 calls), `orch cost today/week/month` (time-filtered). Shows backend, model, call count, input/output tokens, and estimated USD cost. Pricing table covers Bedrock Claude/Nova and Vertex AI Gemini models; unknown models use conservative fallback estimates.
+- **API usage recording** — Every API backend invocation automatically records: backend name, model ID, input/output token counts, estimated cost (USD), latency (ms), and a prompt preview (first 100 chars). New `api_usage` table in SQLite with `AddAPIUsage()`, `GetUsageSummary()`, `GetUsageSince()`, `RecentAPIUsage()` methods.
+- **`/pass` extended for API backends** — `/pass claude bedrock` or `/pass kiro vertexai` now works. When the target is a stateless API backend, context is stored in `session_logs` (not sent via PTY). The next API call picks up this stored context as conversation history.
+- **Registry API backend detection** — New `CheckBedrockCredentials(region)` and `CheckVertexAICredentials()` in `pkg/registry` that validate credentials without making billable calls. Startup prints availability status for enabled API backends.
+- **Route rule targeting** — Existing `route_rules` can now use `target: bedrock` or `target: vertexai` to route patterns to API backends directly.
+
 ### v0.15.0 (2026-07-16)
 
 **Session persistence, cross-session context passing, and approval gate — plus a same-day review that found and fixed 9 real bugs before this shipped.**

@@ -140,3 +140,37 @@ keyword_shortcuts:
     category: query
   - prefix: "gcloud container"
     category: query
+
+# === Stateless API Backends (v0.16+) ===
+# Direct HTTP API calls to cloud model providers.
+# Unlike the PTY-based backends above (kiro/claude/gemini), these are one-shot:
+# send prompt → get response → done. No interactive session.
+#
+# Enable by setting `enabled: true` and ensuring credentials are available:
+#   Bedrock: AWS credentials (env vars / ~/.aws/credentials / SSO)
+#   Vertex AI: GCP ADC (gcloud auth application-default login)
+#
+# Usage tracking is automatic — see `orch cost` to view statistics.
+api_backends:
+  bedrock:
+    enabled: false
+    region: "us-east-1"
+    model_id: "us.anthropic.claude-sonnet-4-20250514-v1:0"
+    # Other models: us.amazon.nova-pro-v1:0, us.amazon.nova-lite-v1:0,
+    #   us.anthropic.claude-3-haiku-20240307-v1:0
+  vertexai:
+    enabled: false
+    project_id: ""        # your GCP project ID
+    region: "us-central1"
+    model_id: "gemini-2.0-flash"
+    # Other models: gemini-1.5-pro, gemini-1.5-flash
+
+# === High-Risk Command Patterns (v0.15+) ===
+# Patterns that trigger the approval gate before execution.
+# Uncomment and modify to customize (replaces the built-in list entirely):
+# high_risk_patterns:
+#   - "terraform apply"
+#   - "terraform destroy"
+#   - "kubectl delete"
+#   - "rm -rf"
+#   - "git push --force"

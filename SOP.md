@@ -41,6 +41,98 @@ orch briefing gen               # auto-generate via MLX
 
 **Auto-pruning**: History is automatically pruned when exceeding `history_limit` (default: 1000 entries). Oldest entries are removed first.
 
+### API Backends (v0.16+)
+
+Stateless HTTP API backends (Bedrock, Vertex AI) for direct cloud model invocation without spawning CLI processes.
+
+#### Setup
+
+```yaml
+# config.yaml
+api_backends:
+  bedrock:
+    enabled: true
+    region: "us-east-1"
+    model_id: "us.anthropic.claude-sonnet-4-20250514-v1:0"
+  vertexai:
+    enabled: true
+    project_id: "my-gcp-project"
+    region: "us-central1"
+    model_id: "gemini-2.0-flash"
+```
+
+#### Credential Requirements
+
+| Backend | Credential | How to configure |
+|---------|-----------|-----------------|
+| Bedrock | AWS standard chain | `aws configure` / env vars / SSO profile |
+| Vertex AI | GCP ADC | `gcloud auth application-default login` |
+
+#### Routing to API Backends
+
+Three ways to invoke API backends:
+
+1. **Route rules** — Add rules in `config.yaml` targeting `bedrock`/`vertexai`:
+   ```yaml
+   route_rules:
+     rules:
+       - pattern: "用 bedrock"
+         target: bedrock
+         strength: 3
+         type: phrase
+       - pattern: "vertex 翻譯"
+         target: vertexai
+         strength: 3
+         type: phrase
+   ```
+
+2. **YAML workflow** — Specify `agent: bedrock` or `agent: vertexai` in a workflow step.
+
+3. **MLX classification** — If configured, MLX can route to `bedrock:api` or `vertexai:api` for explicit requests.
+
+#### Context Passing (`/pass` with API backends)
+
+```bash
+/pass claude bedrock    # pass Claude's last output as context for next Bedrock call
+/pass kiro vertexai     # pass Kiro's last output as context for next Vertex AI call
+```
+
+Unlike PTY session targets, API backend context is stored in `session_logs` and injected as multi-turn conversation history on the next API call.
+
+### Cost Tracking (v0.16+)
+
+Every API backend invocation (Bedrock/Vertex AI) automatically records token usage and estimated cost.
+
+```bash
+orch cost               # all-time summary
+orch cost recent        # last 20 API calls (detailed)
+orch cost today         # today's usage
+orch cost week          # last 7 days
+orch cost month         # last 30 days
+```
+
+Output format:
+```
+BACKEND    MODEL                  CALLS  INPUT TOKENS  OUTPUT TOKENS  COST (USD)
+-------    -----                  -----  ------------  -------------  ----------
+bedrock    claude-sonnet-4...     42     125.3K        89.7K          $1.7205
+vertexai   gemini-2.0-flash      18     45.2K         12.1K          $0.0070
+
+TOTAL                             60                                  $1.7275
+```
+
+**Pricing**: Built-in pricing table covers Bedrock Claude/Nova and Vertex AI Gemini models. Unknown models use conservative fallback estimates. Prices are per 1M tokens based on public pricing.
+
+#### Direct SQLite access
+
+```bash
+# Recent API calls
+sqlite3 ~/.config/orch/orch.db "SELECT timestamp, backend, model, input_tokens, output_tokens, cost_usd FROM api_usage ORDER BY id DESC LIMIT 10;"
+
+# Total cost by backend
+sqlite3 ~/.config/orch/orch.db "SELECT backend, SUM(cost_usd) as total FROM api_usage GROUP BY backend;"
+```
+
 ### REPL Mode
 
 ```bash

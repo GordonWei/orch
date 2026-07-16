@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/chzyer/readline"
+	"github.com/gordonwei/orch/pkg/apibackend"
 	"github.com/gordonwei/orch/pkg/backend"
 	"github.com/gordonwei/orch/pkg/config"
 	"github.com/gordonwei/orch/pkg/eventbus"
@@ -19,7 +20,7 @@ import (
 	"github.com/gordonwei/orch/pkg/workflow"
 )
 
-func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry, bus *eventbus.Bus) {
+func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry, apiBackends map[string]apibackend.APIBackend, bus *eventbus.Bus) {
 	rl, err := readline.NewEx(&readline.Config{
 		Prompt:          "› ",
 		HistoryFile:     os.Getenv("HOME") + "/.orch_history",
@@ -107,7 +108,7 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br
 
 		// Slash commands are handled in both modes
 		if strings.HasPrefix(input, "/") {
-			handleSlashCommand(rl, reg, cfg, store, br, bus, sm, rt, input)
+			handleSlashCommand(rl, reg, cfg, store, br, apiBackends, bus, sm, rt, input)
 			continue
 		}
 
@@ -222,7 +223,7 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br
 			enrichedInput = fmt.Sprintf("[Prior conversation for context]\n%s\n[End prior conversation]\n\nCurrent request: %s", sessionCtx, input)
 		}
 
-		_, output := runTask(nil, reg, cfg, store, br, bus, enrichedInput, false)
+		_, output := runTask(nil, reg, cfg, store, br, apiBackends, bus, enrichedInput, false)
 		replSession.add(input, output)
 		fmt.Fprintln(os.Stderr)
 	}
@@ -268,7 +269,7 @@ func (s *sessionContext) buildContext() string {
 
 // ===== REPL Slash Commands =====
 
-func handleSlashCommand(rl *readline.Instance, reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry, bus *eventbus.Bus, sm *SessionManager, rt *router.Router, input string) {
+func handleSlashCommand(rl *readline.Instance, reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry, apiBackends map[string]apibackend.APIBackend, bus *eventbus.Bus, sm *SessionManager, rt *router.Router, input string) {
 	parts := strings.Fields(input)
 	cmd := strings.ToLower(parts[0])
 	args := parts[1:]
@@ -303,9 +304,9 @@ func handleSlashCommand(rl *readline.Instance, reg *registry.Registry, cfg *conf
 
 	case "/w", "/workflows":
 		if len(args) > 0 {
-			handleWorkflowExec(rl, reg, cfg, store, br, args[0])
+			handleWorkflowExec(rl, reg, cfg, store, br, apiBackends, args[0])
 		} else {
-			handleWorkflowMenu(rl, reg, cfg, store, br)
+			handleWorkflowMenu(rl, reg, cfg, store, br, apiBackends)
 		}
 
 	case "/h", "/history":
@@ -466,6 +467,10 @@ func parseBackend(s string) session.Backend {
 		return session.BackendKiro
 	case "gemini", "g":
 		return session.BackendGemini
+	case "bedrock", "br":
+		return "bedrock"
+	case "vertexai", "vertex", "va":
+		return "vertexai"
 	default:
 		return ""
 	}
@@ -559,6 +564,18 @@ func handlePassCmd(sm *SessionManager, store *memory.Store, args []string) {
 	// Truncate if too long (rune-safe — avoid splitting multi-byte UTF-8 chars)
 	if len(lastOutput) > 8000 {
 		lastOutput = executor.Truncate(lastOutput, 8000)
+	}
+
+	// Stateless API backends (bedrock, vertexai): store context for next Invoke call
+	if toBackend == "bedrock" || toBackend == "vertexai" {
+		contextMsg := fmt.Sprintf("[Context passed from %s]\n%s\n[End of passed context]", fromBackend, lastOutput)
+		if err := store.AddSessionLog(string(toBackend), "user", contextMsg); err != nil {
+			fmt.Fprintf(os.Stderr, "❌ failed to persist context for %s: %v\n", toBackend, err)
+			return
+		}
+		fmt.Fprintf(os.Stderr, "✅ passed %d chars from %s → %s (stored as context for next API call)\n",
+			len(lastOutput), fromBackend, toBackend)
+		return
 	}
 
 	// Ensure target session exists
@@ -708,7 +725,7 @@ func printREPLHelp(sm *SessionManager) {
 
 // ===== Workflow / History / Briefing (unchanged) =====
 
-func handleWorkflowMenu(rl *readline.Instance, reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry) {
+func handleWorkflowMenu(rl *readline.Instance, reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry, apiBackends map[string]apibackend.APIBackend) {
 	workflows, err := workflow.LoadAll(cfg.Workflows.Dir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ failed to load workflows: %v\n", err)
@@ -740,10 +757,10 @@ func handleWorkflowMenu(rl *readline.Instance, reg *registry.Registry, cfg *conf
 		return
 	}
 
-	handleWorkflowExec(rl, reg, cfg, store, br, choice)
+	handleWorkflowExec(rl, reg, cfg, store, br, apiBackends, choice)
 }
 
-func handleWorkflowExec(rl *readline.Instance, reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry, numStr string) {
+func handleWorkflowExec(rl *readline.Instance, reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry, apiBackends map[string]apibackend.APIBackend, numStr string) {
 	idx, err := strconv.Atoi(numStr)
 	if err != nil || idx < 1 {
 		fmt.Fprintf(os.Stderr, "❌ invalid workflow number: %s\n", numStr)
@@ -781,6 +798,8 @@ func handleWorkflowExec(rl *readline.Instance, reg *registry.Registry, cfg *conf
 	e.EventChan = stepEvents
 	e.OutputEvents = outputEvents
 	e.ApprovalFunc = promptApproval
+	e.APIBackends = apiBackends
+	e.MemoryStore = store
 
 	result := e.Execute(plan)
 

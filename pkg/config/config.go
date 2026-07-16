@@ -80,7 +80,8 @@ type Config struct {
 	// command, trigger the executor's approval gate (see pkg/executor).
 	// Ships with a sensible default list (see defaultConfig); set this key
 	// in config.yaml to add or replace patterns without a rebuild.
-	HighRiskPatterns []string `yaml:"high_risk_patterns"`
+	HighRiskPatterns []string          `yaml:"high_risk_patterns"`
+	APIBackends      APIBackendsConfig `yaml:"api_backends"`
 }
 
 // AIBackendConfig defines which AI CLI backend to use for cloud planning/execution.
@@ -93,6 +94,27 @@ type AIBackendConfig struct {
 // WorkflowConfig defines the workflow system configuration.
 type WorkflowConfig struct {
 	Dir string `yaml:"dir"` // workflow YAML directory, default ~/.config/orch/workflows/
+}
+
+// APIBackendsConfig holds configuration for external API backends (Bedrock, VertexAI).
+type APIBackendsConfig struct {
+	Bedrock  BedrockAPIConfig  `yaml:"bedrock"`
+	VertexAI VertexAIAPIConfig `yaml:"vertexai"`
+}
+
+// BedrockAPIConfig holds AWS Bedrock API settings.
+type BedrockAPIConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Region  string `yaml:"region"`
+	ModelID string `yaml:"model_id"`
+}
+
+// VertexAIAPIConfig holds Google Vertex AI API settings.
+type VertexAIAPIConfig struct {
+	Enabled   bool   `yaml:"enabled"`
+	ProjectID string `yaml:"project_id"`
+	Region    string `yaml:"region"`
+	ModelID   string `yaml:"model_id"`
 }
 
 type Persona struct {
@@ -268,6 +290,19 @@ Response rules:
 		},
 		RouteRules:       defaultRouteRules(),
 		HighRiskPatterns: DefaultHighRiskPatterns(),
+		APIBackends: APIBackendsConfig{
+			Bedrock: BedrockAPIConfig{
+				Enabled: false,
+				Region:  "us-east-1",
+				ModelID: "us.anthropic.claude-sonnet-4-20250514-v1:0",
+			},
+			VertexAI: VertexAIAPIConfig{
+				Enabled:   false,
+				ProjectID: "",
+				Region:    "us-central1",
+				ModelID:   "gemini-2.0-flash",
+			},
+		},
 	}
 }
 

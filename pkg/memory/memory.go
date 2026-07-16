@@ -121,6 +121,21 @@ CREATE INDEX IF NOT EXISTS idx_history_category ON history(category);
 CREATE INDEX IF NOT EXISTS idx_history_tags ON history(tags);
 CREATE INDEX IF NOT EXISTS idx_session_logs_backend ON session_logs(backend);
 CREATE INDEX IF NOT EXISTS idx_session_logs_timestamp ON session_logs(timestamp);
+
+CREATE TABLE IF NOT EXISTS api_usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+    backend TEXT NOT NULL,
+    model TEXT NOT NULL,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd REAL NOT NULL DEFAULT 0.0,
+    latency_ms INTEGER NOT NULL DEFAULT 0,
+    prompt_preview TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_api_usage_backend ON api_usage(backend);
+CREATE INDEX IF NOT EXISTS idx_api_usage_timestamp ON api_usage(timestamp);
 `
 
 // --- History ---
@@ -467,4 +482,112 @@ func (s *Store) PruneSessionLogs(olderThanDays int) (int64, error) {
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+// --- API Usage Tracking ---
+
+// APIUsageEntry records a single API call's token usage and cost.
+type APIUsageEntry struct {
+	ID            int64
+	Timestamp     string
+	Backend       string
+	Model         string
+	InputTokens   int
+	OutputTokens  int
+	CostUSD       float64
+	LatencyMs     int64
+	PromptPreview string
+}
+
+// AddAPIUsage records an API call's token usage and estimated cost.
+func (s *Store) AddAPIUsage(entry APIUsageEntry) error {
+	_, err := s.db.Exec(`
+		INSERT INTO api_usage (backend, model, input_tokens, output_tokens, cost_usd, latency_ms, prompt_preview)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		entry.Backend, entry.Model, entry.InputTokens, entry.OutputTokens, entry.CostUSD, entry.LatencyMs, entry.PromptPreview)
+	return err
+}
+
+// UsageSummary holds aggregated usage statistics for a backend.
+type UsageSummary struct {
+	Backend      string
+	Model        string
+	TotalCalls   int
+	TotalInput   int
+	TotalOutput  int
+	TotalCostUSD float64
+}
+
+// GetUsageSummary returns aggregated API usage grouped by backend and model.
+func (s *Store) GetUsageSummary() ([]UsageSummary, error) {
+	rows, err := s.db.Query(`
+		SELECT backend, model, COUNT(*) as total_calls,
+		       SUM(input_tokens) as total_input, SUM(output_tokens) as total_output,
+		       SUM(cost_usd) as total_cost
+		FROM api_usage
+		GROUP BY backend, model
+		ORDER BY total_cost DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var summaries []UsageSummary
+	for rows.Next() {
+		var s UsageSummary
+		if err := rows.Scan(&s.Backend, &s.Model, &s.TotalCalls, &s.TotalInput, &s.TotalOutput, &s.TotalCostUSD); err != nil {
+			return nil, err
+		}
+		summaries = append(summaries, s)
+	}
+	return summaries, nil
+}
+
+// GetUsageSince returns aggregated usage since a given time (for orch cost --since).
+func (s *Store) GetUsageSince(since time.Time) ([]UsageSummary, error) {
+	sinceStr := since.UTC().Format("2006-01-02 15:04:05")
+	rows, err := s.db.Query(`
+		SELECT backend, model, COUNT(*) as total_calls,
+		       SUM(input_tokens) as total_input, SUM(output_tokens) as total_output,
+		       SUM(cost_usd) as total_cost
+		FROM api_usage
+		WHERE timestamp >= ?
+		GROUP BY backend, model
+		ORDER BY total_cost DESC`, sinceStr)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var summaries []UsageSummary
+	for rows.Next() {
+		var s UsageSummary
+		if err := rows.Scan(&s.Backend, &s.Model, &s.TotalCalls, &s.TotalInput, &s.TotalOutput, &s.TotalCostUSD); err != nil {
+			return nil, err
+		}
+		summaries = append(summaries, s)
+	}
+	return summaries, nil
+}
+
+// RecentAPIUsage returns the N most recent API usage entries.
+func (s *Store) RecentAPIUsage(limit int) ([]APIUsageEntry, error) {
+	rows, err := s.db.Query(`
+		SELECT id, timestamp, backend, model, input_tokens, output_tokens, cost_usd, latency_ms, prompt_preview
+		FROM api_usage
+		ORDER BY id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []APIUsageEntry
+	for rows.Next() {
+		var e APIUsageEntry
+		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Backend, &e.Model, &e.InputTokens, &e.OutputTokens, &e.CostUSD, &e.LatencyMs, &e.PromptPreview); err != nil {
+			return nil, err
+		}
+		entries = append(entries, e)
+	}
+	return entries, nil
 }

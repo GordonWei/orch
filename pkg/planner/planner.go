@@ -250,6 +250,28 @@ func (p *Planner) tryKeywordPlan(input string) *Plan {
 		}
 	}
 
+	// API backend routing: check if route_rules strongly suggest bedrock/vertexai.
+	// This allows users to configure patterns like "用 bedrock" or "bedrock 翻譯"
+	// that route directly to API backends without going through MLX classification.
+	if p.router != nil {
+		suggested, _ := p.router.SuggestBackend(input)
+		if suggested == "bedrock" || suggested == "vertexai" {
+			return &Plan{
+				TaskSummary: input,
+				Difficulty:  "simple",
+				Category:    "api",
+				Steps: []Step{
+					{
+						ID:          "step_1",
+						Description: input,
+						Agent:       string(suggested),
+						Prompt:      input,
+					},
+				},
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -273,8 +295,8 @@ func (p *Planner) tryMLX(userInput string) (*Plan, error) {
 	systemPrompt := `You are a task classifier. Given a user request, output EXACTLY one line with the format:
 agent:category
 
-AGENTS: local, kiro, claude, gemini, shell
-CATEGORIES: chat, infra, code, docs, query, meeting, deploy
+AGENTS: local, kiro, claude, gemini, shell, bedrock, vertexai
+CATEGORIES: chat, infra, code, docs, query, meeting, deploy, api
 
 RULES:
 - local:chat → greetings, Q&A, simple conversations, self-introduction
@@ -284,12 +306,15 @@ RULES:
 - claude:docs → writing, analysis, meeting notes, Notion sync
 - claude:query → complex questions needing deep reasoning
 - gemini:docs → very long document summarization
+- bedrock:api → user explicitly requests Bedrock, or task needs direct cloud model API (e.g., "用 bedrock", "bedrock 翻譯")
+- vertexai:api → user explicitly requests Vertex AI, or task needs Gemini model via API (e.g., "用 vertex", "vertex 分析")
 
 OUTPUT ONLY ONE LINE. No explanation. No JSON. No markdown. Example outputs:
 local:chat
 kiro:infra
 shell:infra
-claude:docs`
+claude:docs
+bedrock:api`
 
 	reqBody := map[string]interface{}{
 		"model": p.mlxModel,

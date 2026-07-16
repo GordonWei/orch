@@ -17,8 +17,10 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/gordonwei/orch/pkg/apibackend"
 	"github.com/gordonwei/orch/pkg/backend"
 	"github.com/gordonwei/orch/pkg/config"
+	"github.com/gordonwei/orch/pkg/memory"
 	"github.com/gordonwei/orch/pkg/planner"
 )
 
@@ -94,6 +96,13 @@ type Executor struct {
 	// and emits periodic progress events for AI agent calls.
 	// This channel is NOT closed by Executor — the caller manages its lifecycle.
 	OutputEvents chan<- OutputEvent
+
+	// APIBackends holds stateless API backends (Bedrock, Vertex AI) keyed by name.
+	// If nil or empty, API backend steps will fail with a clear error.
+	APIBackends map[string]apibackend.APIBackend
+
+	// MemoryStore, if set, is used to record API usage (token counts + cost).
+	MemoryStore *memory.Store
 }
 
 // New creates a new Executor instance.
@@ -536,6 +545,81 @@ func (e *Executor) runStep(step planner.Step, priorContext string) (string, erro
 		output, err := b.Execute(prompt, workDir)
 		return output, err
 
+	case "bedrock", "vertexai":
+		// Stateless API backend path — direct HTTP API call, no PTY session
+		ab, ok := e.APIBackends[step.Agent]
+		if !ok || ab == nil {
+			return "", fmt.Errorf("API backend %q not configured (check api_backends in config.yaml)", step.Agent)
+		}
+		if !ab.Available() {
+			return "", fmt.Errorf("API backend %q credentials not available", step.Agent)
+		}
+
+		prompt := step.Prompt
+		if prompt == "" {
+			prompt = step.Description
+		}
+		if priorContext != "" {
+			prompt = fmt.Sprintf("Context from prior steps:\n%s\n\nTask: %s", priorContext, prompt)
+		}
+
+		// Build request — check session_logs for /pass context (multi-turn)
+		var messages []apibackend.Message
+		if e.MemoryStore != nil {
+			// Read recent session_logs for this backend (context passed via /pass)
+			logs, err := e.MemoryStore.RecentSessionLogs(step.Agent, 10)
+			if err == nil && len(logs) > 0 {
+				for _, log := range logs {
+					messages = append(messages, apibackend.Message{
+						Role:    log.Role,
+						Content: log.Content,
+					})
+				}
+			}
+		}
+		// Append current prompt as the final user message
+		messages = append(messages, apibackend.Message{
+			Role:    "user",
+			Content: prompt,
+		})
+
+		req := apibackend.Request{
+			Messages:    messages,
+			MaxTokens:   4096,
+			Temperature: 0.7,
+		}
+
+		resp, err := ab.Invoke(ctx, req)
+		if err != nil {
+			return "", fmt.Errorf("API backend %q invocation failed: %w", step.Agent, err)
+		}
+
+		// Persist the response to session_logs (so /pass can read it back later)
+		if e.MemoryStore != nil && resp != nil {
+			if err := e.MemoryStore.AddSessionLog(step.Agent, "assistant", resp.Content); err != nil {
+				fmt.Fprintf(os.Stderr, "⚠️  failed to persist API response to session log: %v\n", err)
+			}
+		}
+
+		// Record API usage (token count + cost estimation)
+		if e.MemoryStore != nil && resp != nil {
+			costUSD := estimateCost(step.Agent, resp.Model, resp.InputTokens, resp.OutputTokens)
+			preview := TruncateWithSuffix(prompt, 100, "…")
+			if err := e.MemoryStore.AddAPIUsage(memory.APIUsageEntry{
+				Backend:       step.Agent,
+				Model:         resp.Model,
+				InputTokens:   resp.InputTokens,
+				OutputTokens:  resp.OutputTokens,
+				CostUSD:       costUSD,
+				LatencyMs:     resp.Latency.Milliseconds(),
+				PromptPreview: preview,
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "⚠️  failed to record API usage: %v\n", err)
+			}
+		}
+
+		return resp.Content, nil
+
 	case "shell":
 		if step.Command == "" {
 			return "", fmt.Errorf("shell step has no command")
@@ -815,4 +899,59 @@ func (e *Executor) isHighRiskCommand(command string) bool {
 		}
 	}
 	return false
+}
+
+// ===== Cost Estimation =====
+
+// estimateCost calculates estimated USD cost based on backend/model pricing.
+// Prices are per 1M tokens as of 2024 public pricing.
+func estimateCost(backend, model string, inputTokens, outputTokens int) float64 {
+	type pricing struct {
+		inputPer1M  float64
+		outputPer1M float64
+	}
+
+	// Known pricing (per 1M tokens, USD)
+	prices := map[string]pricing{
+		// Bedrock — Anthropic Claude models (both direct model ID and inference profile ID)
+		"us.anthropic.claude-sonnet-4-20250514-v1:0":    {3.0, 15.0},
+		"anthropic.claude-sonnet-4-20250514-v1:0":       {3.0, 15.0},
+		"us.anthropic.claude-3-5-sonnet-20241022-v2:0":  {3.0, 15.0},
+		"anthropic.claude-3-5-sonnet-20241022-v2:0":     {3.0, 15.0},
+		"us.anthropic.claude-3-5-haiku-20241022-v1:0":   {0.8, 4.0},
+		"anthropic.claude-3-5-haiku-20241022-v1:0":      {0.8, 4.0},
+		"anthropic.claude-3-haiku-20240307-v1:0":        {0.25, 1.25},
+		"anthropic.claude-3-sonnet-20240229-v1:0":       {3.0, 15.0},
+		"anthropic.claude-3-opus-20240229-v1:0":         {15.0, 75.0},
+		// Bedrock — Amazon Nova models
+		"us.amazon.nova-pro-v1:0":   {0.8, 3.2},
+		"amazon.nova-pro-v1:0":      {0.8, 3.2},
+		"us.amazon.nova-lite-v1:0":  {0.06, 0.24},
+		"amazon.nova-lite-v1:0":     {0.06, 0.24},
+		"us.amazon.nova-micro-v1:0": {0.035, 0.14},
+		"amazon.nova-micro-v1:0":    {0.035, 0.14},
+		// Vertex AI — Gemini models
+		"gemini-2.0-flash":     {0.075, 0.30},
+		"gemini-2.0-flash-001": {0.075, 0.30},
+		"gemini-1.5-pro":       {1.25, 5.0},
+		"gemini-1.5-flash":     {0.075, 0.30},
+		"gemini-1.5-flash-002": {0.075, 0.30},
+	}
+
+	p, ok := prices[model]
+	if !ok {
+		// Fallback: use conservative estimate based on backend
+		switch backend {
+		case "bedrock":
+			p = pricing{3.0, 15.0} // assume Claude 3.5 Sonnet tier
+		case "vertexai":
+			p = pricing{0.075, 0.30} // assume Gemini Flash tier
+		default:
+			p = pricing{1.0, 5.0} // generic fallback
+		}
+	}
+
+	cost := (float64(inputTokens) * p.inputPer1M / 1_000_000) +
+		(float64(outputTokens) * p.outputPer1M / 1_000_000)
+	return cost
 }
