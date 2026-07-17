@@ -34,19 +34,19 @@ ai_backend:
 # The model with `default: true` is used for local inference (Layer 2).
 # MLX is optional — orch works fine without it (skips to Layer 3).
 models:
-  - name: "qwen-3b"
+  - name: "qwen-7b"
     backend: "mlx"
     endpoint: "http://localhost:8080"
-    model: "mlx-community/Qwen2.5-3B-Instruct-4bit"
+    model: "mlx-community/Qwen2.5-7B-Instruct-4bit"
     python_path: "~/mlx-env/bin/python3"
     auto_start: true
     port: "8080"
     default: true
   # --- Other available models (uncomment to switch) ---
-  # - name: "qwen-1.5b"
+  # - name: "qwen-3b"
   #   backend: "mlx"
   #   endpoint: "http://localhost:8080"
-  #   model: "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+  #   model: "mlx-community/Qwen2.5-3B-Instruct-4bit"
   #   python_path: "~/mlx-env/bin/python3"
   #   auto_start: true
   #   port: "8080"
