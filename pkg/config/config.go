@@ -213,7 +213,34 @@ func Load() *Config {
 		cfg.Models[i].PythonPath = expandHome(cfg.Models[i].PythonPath)
 	}
 
+	mergeDefaultRouteRules(cfg)
+
 	return cfg
+}
+
+// mergeDefaultRouteRules restores built-in route_rules that a user's config.yaml
+// doesn't already define. YAML unmarshaling replaces slices wholesale (never
+// merges) when the source document has the key — so a config.yaml with even one
+// custom rule under route_rules.rules silently discarded the ~200 built-in
+// cli/chat/gemini rules, despite the config.yaml template's own comment claiming
+// "they MERGE with defaults (do not override them)". That comment was aspirational
+// until this function existed: real-world discovery was a user's config with 4
+// custom bedrock/vertexai phrase rules losing every built-in chat greeting
+// pattern, silently degrading "你好" and friends to a length-based guess instead
+// of a precise match. Keyed on pattern+type so a genuine override (same
+// pattern+type, different target/strength) is respected rather than duplicated;
+// a no-op when the user's config doesn't touch route_rules.rules at all, since
+// cfg.RouteRules.Rules already equals the defaults from defaultConfig() in that case.
+func mergeDefaultRouteRules(cfg *Config) {
+	existing := make(map[string]bool, len(cfg.RouteRules.Rules))
+	for _, r := range cfg.RouteRules.Rules {
+		existing[r.Pattern+"|"+r.Type] = true
+	}
+	for _, def := range DefaultRouteRules().Rules {
+		if !existing[def.Pattern+"|"+def.Type] {
+			cfg.RouteRules.Rules = append(cfg.RouteRules.Rules, def)
+		}
+	}
 }
 
 // ActiveModel returns the default model definition.

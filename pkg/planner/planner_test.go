@@ -2,13 +2,16 @@ package planner
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gordonwei/orch/pkg/backend"
 	"github.com/gordonwei/orch/pkg/config"
 	"github.com/gordonwei/orch/pkg/registry"
+	"github.com/gordonwei/orch/pkg/router"
 )
 
 // test helper
@@ -689,6 +692,65 @@ func TestFixPlan_ShellToCloud_VerbatimCommand(t *testing.T) {
 	}
 }
 
+// TestFixPlan_ChatMisclassification_RerouteAndFixCategory is a regression test for a
+// bug found while evaluating a larger classifier model: it can pick "local:chat" for
+// input the router's own deterministic Classify() considers natural language (e.g.
+// "查一下狀態", "那讀交接" — short but not in the curated greeting whitelist). Until
+// this fix, nothing validated "local:chat" the way shell/bedrock picks were already
+// validated. Critically, this also asserts plan.Category gets corrected: main.go's
+// DirectChat() trigger is `plan.Category == "chat" || (... && Agent == "local")` — if
+// only step.Agent were changed and Category were left as "chat", the first half of
+// that OR would still fire and DirectChat would run anyway, silently undoing the
+// reroute.
+func TestFixPlan_ChatMisclassification_RerouteAndFixCategory(t *testing.T) {
+	p := newTestPlanner(t)
+	input := "查一下狀態" // router.Classify: NaturalLanguage (5 runes, not a known greeting)
+
+	plan := &Plan{
+		TaskSummary: input,
+		Difficulty:  "simple",
+		Category:    "chat",
+		Steps: []Step{
+			{ID: "step_1", Agent: "local", Prompt: input},
+		},
+	}
+
+	fixed := p.fixPlan(plan, input)
+	if fixed.Steps[0].Agent == "local" {
+		t.Errorf("fixPlan should reroute a local:chat pick the router considers natural language, got agent=%q", fixed.Steps[0].Agent)
+	}
+	if fixed.Category == "chat" {
+		t.Errorf("fixPlan must also update plan.Category away from \"chat\" — main.go checks Category before Agent for the DirectChat trigger, got category=%q", fixed.Category)
+	}
+	if fixed.Steps[0].Prompt != input {
+		t.Errorf("fixPlan should set prompt to userInput when rerouting, got %q", fixed.Steps[0].Prompt)
+	}
+}
+
+// TestFixPlan_GenuineChat_NotRerouted verifies the new "local" guard doesn't reroute
+// actual greetings — only chat picks the router itself disagrees with.
+func TestFixPlan_GenuineChat_NotRerouted(t *testing.T) {
+	p := newTestPlanner(t)
+	input := "你好" // matches a curated type="chat" route_rule -> router.Classify: ClassChat
+
+	plan := &Plan{
+		TaskSummary: input,
+		Difficulty:  "simple",
+		Category:    "chat",
+		Steps: []Step{
+			{ID: "step_1", Agent: "local", Prompt: input},
+		},
+	}
+
+	fixed := p.fixPlan(plan, input)
+	if fixed.Steps[0].Agent != "local" {
+		t.Errorf("fixPlan should not reroute a genuine greeting, got agent=%q", fixed.Steps[0].Agent)
+	}
+	if fixed.Category != "chat" {
+		t.Errorf("fixPlan should not change Category for a genuine greeting, got category=%q", fixed.Category)
+	}
+}
+
 // TestGeneratePlan_MLXShellMisclassification_Rerouted is an end-to-end regression test for
 // the actual bug reported by the user: MLX classifies a natural-language file-read request
 // as "shell:infra", and GeneratePlan must catch this via fixPlan before returning the plan —
@@ -726,6 +788,155 @@ func TestGeneratePlan_MLXShellMisclassification_Rerouted(t *testing.T) {
 	}
 	if plan.Steps[0].Command != "" {
 		t.Errorf("rerouted step should have no command, got command=%q", plan.Steps[0].Command)
+	}
+}
+
+// TestExtractRecentContextHint verifies the REPL-wrapper parsing that feeds recent
+// conversation into MLX classification, so short follow-ups like "那讀交接" aren't
+// classified blind. Coupled to repl.go's exact enrichedInput format by necessity
+// (same coupling GeneratePlan's "Current request: " extraction already has).
+func TestExtractRecentContextHint(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "no_wrapper_oneshot",
+			input: "讀取 /path/to/file",
+			want:  "",
+		},
+		{
+			name:  "single_prior_turn",
+			input: "[Prior conversation for context]\nUser: 今天是 7/17 為何還是 7/1 的重點？\nAssistant: 因為...\n[End prior conversation]\n\nCurrent request: 那讀交接",
+			want:  "User: 今天是 7/17 為何還是 7/1 的重點？\nAssistant: 因為...",
+		},
+		{
+			name:  "multiple_prior_turns_keeps_only_last",
+			input: "[Prior conversation for context]\nUser: 你好\nAssistant: 嗨\n---\nUser: 今天是 7/17 為何還是 7/1 的重點？\nAssistant: 因為...\n[End prior conversation]\n\nCurrent request: 那讀交接",
+			want:  "User: 今天是 7/17 為何還是 7/1 的重點？\nAssistant: 因為...",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractRecentContextHint(tc.input)
+			if got != tc.want {
+				t.Errorf("extractRecentContextHint(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestExtractRecentContextHint_Truncates verifies long prior turns are bounded
+// rune-safely rather than blowing up the 3B model's classify-only prompt.
+func TestExtractRecentContextHint_Truncates(t *testing.T) {
+	longTurn := "User: " + strings.Repeat("繁體中文測試", 100) // way over 300 runes
+	input := "[Prior conversation for context]\n" + longTurn + "\n[End prior conversation]\n\nCurrent request: 那讀交接"
+
+	got := extractRecentContextHint(input)
+	if len([]rune(got)) > 301 { // 300 + "…"
+		t.Errorf("extractRecentContextHint should truncate to ~300 runes, got %d runes", len([]rune(got)))
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("expected truncated hint to end with an ellipsis marker, got %q", truncateRunes(got, 50))
+	}
+}
+
+// TestGeneratePlan_MLXReceivesRecentContext verifies the wiring end-to-end: when
+// GeneratePlan is called with a REPL-wrapped input, the recent-context hint
+// actually reaches the HTTP request MLX receives. This only proves the pipeline
+// carries context through — it can't test whether the 3B model's own judgment
+// improves, since that's real (non-deterministic) LLM inference, not something a
+// unit test can assert on.
+func TestGeneratePlan_MLXReceivesRecentContext(t *testing.T) {
+	var capturedBody string
+	mlx := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			w.WriteHeader(http.StatusOK)
+		case "/v1/chat/completions":
+			body, _ := io.ReadAll(r.Body)
+			capturedBody = string(body)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"kiro:infra"}}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mlx.Close()
+
+	p := newTestPlanner(t)
+	p.mlxEndpoint = mlx.URL
+	p.mlxModel = "test-model"
+
+	wrapped := "[Prior conversation for context]\nUser: 今天是 7/17 為何還是 7/1 的重點？\nAssistant: 因為 briefing 快取沒更新。\n[End prior conversation]\n\nCurrent request: 那讀交接"
+
+	if _, err := p.GeneratePlan(wrapped); err != nil {
+		t.Fatalf("GeneratePlan returned error: %v", err)
+	}
+
+	if !strings.Contains(capturedBody, "briefing 快取沒更新") {
+		t.Errorf("expected the MLX request body to contain the recent-context hint, got: %s", capturedBody)
+	}
+	if !strings.Contains(capturedBody, "Classify this message: 那讀交接") {
+		t.Errorf("expected the MLX request body to still isolate the current message to classify, got: %s", capturedBody)
+	}
+}
+
+// TestFixPlan_BedrockHallucination_RerouteToClaude is a regression test for a real
+// bug found while evaluating a larger classifier model: MLX can hallucinate
+// agent="bedrock"/"vertexai" for tasks that have nothing to do with either API
+// backend (observed: a meeting-notes summarization request classified as
+// "bedrock:docs" with zero mention of Bedrock). Unlike shell commands there's no
+// step.Command to sanity-check, so fixPlan cross-checks against the router's own
+// phrase/keyword signal — no real match means the pick was ungrounded.
+func TestFixPlan_BedrockHallucination_RerouteToClaude(t *testing.T) {
+	p := newTestPlanner(t) // config.DefaultRouteRules() has no bedrock/vertexai rules
+	input := "整理今天三場會議記錄到 Notion"
+
+	plan := &Plan{
+		TaskSummary: input,
+		Difficulty:  "simple",
+		Category:    "docs",
+		Steps: []Step{
+			{ID: "step_1", Agent: "bedrock", Prompt: input},
+		},
+	}
+
+	fixed := p.fixPlan(plan, input)
+	if fixed.Steps[0].Agent == "bedrock" {
+		t.Errorf("fixPlan should reroute a bedrock pick with no real route_rule signal, got agent=%q", fixed.Steps[0].Agent)
+	}
+	if fixed.Steps[0].Prompt != input {
+		t.Errorf("fixPlan should set prompt to userInput when rerouting, got %q", fixed.Steps[0].Prompt)
+	}
+}
+
+// TestFixPlan_BedrockRealSignal_NotRerouted verifies the guard doesn't reroute a
+// genuine bedrock/vertexai request — only ones without a matching route_rule.
+func TestFixPlan_BedrockRealSignal_NotRerouted(t *testing.T) {
+	cfg := config.DefaultRouteRules()
+	cfg.Rules = append(cfg.Rules, config.RouteRule{
+		Pattern: "用 bedrock", Target: "bedrock", Strength: 3, Type: "phrase",
+	})
+	reg := registry.Scan()
+	br := backend.NewRegistry("")
+	p := New(reg, &config.Config{RouteRules: cfg}, br, router.New(cfg))
+
+	input := "用 bedrock 翻譯這段文字"
+	plan := &Plan{
+		TaskSummary: input,
+		Difficulty:  "simple",
+		Category:    "api",
+		Steps: []Step{
+			{ID: "step_1", Agent: "bedrock", Prompt: input},
+		},
+	}
+
+	fixed := p.fixPlan(plan, input)
+	if fixed.Steps[0].Agent != "bedrock" {
+		t.Errorf("fixPlan should NOT reroute a bedrock pick that matches a real route_rule, got agent=%q", fixed.Steps[0].Agent)
 	}
 }
 

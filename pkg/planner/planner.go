@@ -121,8 +121,11 @@ func (p *Planner) GeneratePlan(userInput string) (*Plan, error) {
 
 	// Layer 2: MLX local LLM (Apple Silicon local inference)
 	if p.mlxAvailable() {
-		// Use classifyInput for classification (no session context noise)
-		plan, err := p.tryMLX(classifyInput)
+		// Use classifyInput for the message to classify (no full session context
+		// noise in the "current message" slot), but pass a short hint of the most
+		// recent prior turn so short follow-ups like "那讀交接" aren't classified
+		// blind — see extractRecentContextHint.
+		plan, err := p.tryMLX(classifyInput, extractRecentContextHint(userInput))
 		if err == nil && plan != nil {
 			// The 3B model's classification is a guess, not a guarantee — fixPlan catches
 			// cases where it picked agent="shell" for input that isn't an actual shell
@@ -152,6 +155,42 @@ func (p *Planner) GeneratePlan(userInput string) (*Plan, error) {
 	}
 	fmt.Fprintf(os.Stderr, "   ☁️  routed by: %s (cloud)\n", primaryName)
 	return p.tryCloud(userInput)
+}
+
+// extractRecentContextHint pulls a short, bounded hint of the single most recent
+// prior turn out of a REPL-wrapped userInput (see repl.go's enrichedInput format:
+// "[Prior conversation for context]\n<turns joined by \n---\n>\n[End prior
+// conversation]\n\nCurrent request: <input>"). Returns "" if userInput has no such
+// wrapper (e.g. one-shot invocations), so MLX classification of a fresh session's
+// first message is unaffected. Bounded to keep the 3B model's classify-only prompt
+// small — this is a hint for resolving pronouns/ellipsis in short follow-ups, not a
+// full conversation replay.
+func extractRecentContextHint(userInput string) string {
+	const startMarker = "[Prior conversation for context]\n"
+	const endMarker = "\n[End prior conversation]"
+
+	start := strings.Index(userInput, startMarker)
+	end := strings.Index(userInput, endMarker)
+	if start == -1 || end == -1 || end <= start+len(startMarker) {
+		return ""
+	}
+
+	context := userInput[start+len(startMarker) : end]
+	turns := strings.Split(context, "\n---\n")
+	last := strings.TrimSpace(turns[len(turns)-1])
+	return truncateRunes(last, 300)
+}
+
+// truncateRunes truncates s to at most max runes without splitting a multi-byte
+// UTF-8 character (this codebase is CJK-heavy). Cannot import pkg/executor's
+// equivalent helper here — executor already imports planner, so the reverse
+// import would cycle.
+func truncateRunes(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "…"
 }
 
 // ===== Layer 1: Keyword Match =====
@@ -291,7 +330,7 @@ func (p *Planner) mlxAvailable() bool {
 	return resp.StatusCode == 200
 }
 
-func (p *Planner) tryMLX(userInput string) (*Plan, error) {
+func (p *Planner) tryMLX(userInput string, recentContext string) (*Plan, error) {
 	// Strategy: ask the small model to output ONLY a classification line.
 	// Format: "agent:category" e.g., "local:chat", "kiro:infra", "claude:docs"
 	// This is far more reliable than asking a 3B model to generate valid JSON.
@@ -312,22 +351,41 @@ RULES:
 - gemini:docs → very long document summarization
 - bedrock:api → user explicitly requests Bedrock, or task needs direct cloud model API (e.g., "用 bedrock", "bedrock 翻譯")
 - vertexai:api → user explicitly requests Vertex AI, or task needs Gemini model via API (e.g., "用 vertex", "vertex 分析")
+- If "Recent context" is given below, use it to understand short follow-ups
+  (e.g. "那讀交接", "繼續", "查一下") — classify based on what the follow-up
+  is actually asking for given that context, not as local:chat by default.
 
-OUTPUT ONLY ONE LINE. No explanation. No JSON. No markdown. Example outputs:
+STRICT OUTPUT FORMAT: exactly two words joined by one colon, nothing else.
+Do NOT write the word "agent" or "category" anywhere in your answer.
+Correct:   kubectl get pods -> shell:infra
+Incorrect: agent:shell:infra
+Incorrect: agent:shell
+Incorrect: The answer is shell:infra
+
+Example outputs:
 local:chat
 kiro:infra
 shell:infra
 claude:docs
 bedrock:api`
 
+	userContent := userInput
+	if recentContext != "" {
+		userContent = fmt.Sprintf("Recent context (for understanding follow-ups only, do not classify this part):\n%s\n\nClassify this message: %s", recentContext, userInput)
+	}
+
 	reqBody := map[string]interface{}{
 		"model": p.mlxModel,
 		"messages": []map[string]string{
 			{"role": "system", "content": systemPrompt},
-			{"role": "user", "content": userInput},
+			{"role": "user", "content": userContent},
 		},
-		"max_tokens":         20,
-		"temperature":        0.05,
+		"max_tokens": 20,
+		// 0, not a small positive value: this is a strict classification task with
+		// one correct-ish answer, not creative generation — greedy decoding is more
+		// consistent than even a small amount of sampling temperature, which was
+		// producing different classifications for the same input across runs.
+		"temperature":        0.0,
 		"repetition_penalty": 1.2,
 	}
 
@@ -493,6 +551,43 @@ func (p *Planner) fixPlan(plan *Plan, userInput string) *Plan {
 			} else if step.Prompt == "" {
 				step.Agent = "claude"
 				step.Prompt = userInput
+			}
+		case "bedrock", "vertexai":
+			// The classifier can hallucinate these for tasks that have nothing to
+			// do with either API backend (observed: a meeting-notes summarization
+			// request classified as "bedrock:docs" with zero mention of Bedrock).
+			// Unlike shell commands, there's no local.Command to sanity-check, so
+			// cross-check against the router's own phrase/keyword signal — the
+			// same one tryKeywordPlan() uses to decide whether bedrock/vertexai
+			// was actually requested. No real signal means the classifier's pick
+			// was ungrounded; reroute to claude rather than pay for the wrong
+			// cloud model call.
+			if p.router != nil {
+				suggested, _ := p.router.SuggestBackend(userInput)
+				if string(suggested) != step.Agent {
+					step.Agent = "claude"
+					step.Prompt = userInput
+					step.Command = ""
+				}
+			}
+		case "local":
+			// Symmetric with the shell/bedrock/vertexai guards above: MLX's
+			// "local:chat" pick is a guess too, and until now nothing validated
+			// it. Cross-check against the router's own deterministic Classify()
+			// (curated greeting whitelist + tech-keyword override + short-input
+			// heuristics) — if the router thinks this is natural language, not
+			// chat, trust that over the classifier's guess and give it to an
+			// agent with real tools instead of a tool-less free-form answer.
+			//
+			// Also fix plan.Category: main.go's DirectChat() trigger checks
+			// plan.Category == "chat" *before* looking at step.Agent at all
+			// (`plan.Category == "chat" || (...&& Agent == "local")`), so
+			// leaving Category as "chat" here would silently undo the reroute —
+			// DirectChat would still fire regardless of what step.Agent says.
+			if isNaturalLanguage {
+				step.Agent = "claude"
+				step.Prompt = userInput
+				plan.Category = "query"
 			}
 		}
 	}

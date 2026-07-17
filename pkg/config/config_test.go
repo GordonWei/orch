@@ -196,11 +196,102 @@ route_rules:
 	if cfg.RouteRules.HistorySize != 10 {
 		t.Errorf("RouteRules.HistorySize = %d, want 10", cfg.RouteRules.HistorySize)
 	}
-	if len(cfg.RouteRules.Rules) != 1 {
-		t.Fatalf("len(RouteRules.Rules) = %d, want 1", len(cfg.RouteRules.Rules))
+	// mergeDefaultRouteRules restores built-in rules alongside the user's custom
+	// one (see its doc comment) — a config.yaml with route_rules.rules set is
+	// additive, not a full override, so this should be the custom rule plus all
+	// built-ins, not just the one rule from this test's YAML.
+	def := DefaultRouteRules()
+	if len(cfg.RouteRules.Rules) != len(def.Rules)+1 {
+		t.Fatalf("len(RouteRules.Rules) = %d, want %d (built-in defaults + 1 custom)", len(cfg.RouteRules.Rules), len(def.Rules)+1)
 	}
-	if cfg.RouteRules.Rules[0].Pattern != "custom phrase" {
-		t.Errorf("RouteRules.Rules[0].Pattern = %q, want 'custom phrase'", cfg.RouteRules.Rules[0].Pattern)
+	found := false
+	for _, r := range cfg.RouteRules.Rules {
+		if r.Pattern == "custom phrase" && r.Target == "kiro" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected custom rule 'custom phrase' -> kiro to survive the merge")
+	}
+	// Spot-check a couple of built-in rules also survived the merge.
+	hasBuiltinChat, hasBuiltinCLI := false, false
+	for _, r := range cfg.RouteRules.Rules {
+		if r.Pattern == "你好" && r.Type == "chat" {
+			hasBuiltinChat = true
+		}
+		if r.Pattern == "kubectl" && r.Type == "cli" {
+			hasBuiltinCLI = true
+		}
+	}
+	if !hasBuiltinChat {
+		t.Error("expected built-in chat rule '你好' to survive the merge")
+	}
+	if !hasBuiltinCLI {
+		t.Error("expected built-in cli rule 'kubectl' to survive the merge")
+	}
+}
+
+// TestLoad_RouteRulesMergeIsAdditiveNotDuplicating verifies that re-specifying a
+// built-in rule's pattern+type in the user's config overrides it (no duplicate
+// entry), while everything else still merges in. This is the regression test for
+// the real bug found during v0.16.3 evaluation: a user's config.yaml with a few
+// custom route_rules silently discarded all ~200 built-in rules (including every
+// chat greeting pattern) because YAML unmarshal replaces slices wholesale, not
+// merges them — despite the config.yaml template's own comment claiming rules
+// "MERGE with defaults (do not override them)".
+func TestLoad_RouteRulesMergeIsAdditiveNotDuplicating(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+
+	// Override a built-in chat pattern's target, plus one genuinely new rule.
+	yamlContent := `
+route_rules:
+  rules:
+    - pattern: "你好"
+      target: "kiro"
+      strength: 1
+      type: "chat"
+    - pattern: "用 bedrock"
+      target: "bedrock"
+      strength: 3
+      type: "phrase"
+`
+	if err := os.WriteFile(configPath, []byte(yamlContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ORCH_CONFIG", configPath)
+
+	cfg := Load()
+
+	matches := 0
+	overriddenTarget := ""
+	for _, r := range cfg.RouteRules.Rules {
+		if r.Pattern == "你好" && r.Type == "chat" {
+			matches++
+			overriddenTarget = r.Target
+		}
+	}
+	if matches != 1 {
+		t.Errorf("expected exactly 1 rule for 你好/chat after override (no duplicate), got %d", matches)
+	}
+	if overriddenTarget != "kiro" {
+		t.Errorf("expected the user's override (target=kiro) to win over the built-in default, got target=%q", overriddenTarget)
+	}
+
+	hasBedrockRule := false
+	for _, r := range cfg.RouteRules.Rules {
+		if r.Pattern == "用 bedrock" && r.Target == "bedrock" {
+			hasBedrockRule = true
+		}
+	}
+	if !hasBedrockRule {
+		t.Error("expected the new custom bedrock rule to be present")
+	}
+
+	def := DefaultRouteRules()
+	if len(cfg.RouteRules.Rules) != len(def.Rules)+1 {
+		t.Errorf("len(RouteRules.Rules) = %d, want %d (defaults, with 你好 overridden not duplicated, plus 1 new rule)", len(cfg.RouteRules.Rules), len(def.Rules)+1)
 	}
 }
 
