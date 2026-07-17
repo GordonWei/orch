@@ -41,6 +41,26 @@ orch briefing gen               # auto-generate via MLX
 
 **Auto-pruning**: History is automatically pruned when exceeding `history_limit` (default: 1000 entries). Oldest entries are removed first.
 
+**Startup briefing freshness (v0.16.2+)**: `orch briefing gen` only summarizes
+orch's own task history, and only when you remember to manually re-run it — the
+cached result shown by `briefing_on_boot` can silently go stale for weeks. If you
+maintain a project status/handoff document by hand, set `memory.briefing_source_file`
+(prompted during `orch init`, or add it directly to `config.yaml`):
+
+```yaml
+memory:
+  briefing_on_boot: true
+  briefing_source_file: "~/path/to/your/status-or-handoff.md"
+```
+
+When set, every startup re-reads and re-summarizes that file fresh via the local
+model (also saved via `SetBriefing`, so `orch briefing` reflects it too) — instead
+of trusting a cache. Falls back silently to the last cached briefing if the file is
+missing or MLX is unreachable (never blocks startup); re-run with `--verbose` to see
+why a fallback happened. Note: `memory.auto_summarize` is a reserved config key with
+no implementation behind it yet — `briefing_source_file` is the supported way to
+keep the startup briefing current.
+
 ### API Backends (v0.16+)
 
 Stateless HTTP API backends (Bedrock, Vertex AI) for direct cloud model invocation without spawning CLI processes.
@@ -444,6 +464,26 @@ If a technical request gets answered by the local 3B model instead of cloud:
 - Use `--verbose` to see MLX classification output
 - Add relevant tech keywords to `keyword_shortcuts` in config
 - Override with `--backend kiro "your task"` for one-off
+
+**Short Chinese input specifically (fixed in v0.16.2)**: before v0.16.2, any Chinese
+input at or under 10 runes was unconditionally classified as chat, even task
+references like `那讀交接` ("then read the handoff") — swallowing them into the
+local model's free-form (tool-less) chat completion instead of real planning. This
+is now `route_rules.chat_short_input_max_len` (default `1` — just enough to catch
+bare acknowledgments like `好`). Unrecognized short Chinese input now falls through
+to keyword/CLI checks and then MLX classification, which can itself return
+`local:chat` if it judges the input is genuinely conversational — a real judgment
+call instead of a blind length guess. Raise the config value if you want more short
+input to skip MLX and go straight to chat (trades accuracy for speed); set to `0`
+to disable the fast path entirely.
+
+Two related things this does **not** fix, since they're not routing bugs:
+- The local 3B model's own answer quality/language-instruction-following is a
+  model capability limit, not something `fixPlan`/`router.Classify` controls.
+- MLX classification only ever sees the current utterance (`classifyInput`, not
+  prior conversation) — so a genuine follow-up like `那讀交接` still can't be
+  resolved to "read today's briefing" without conversation context, which no
+  layer currently passes into MLX classification.
 
 ### Task misrouted as a shell command (fixed in v0.16.1)
 

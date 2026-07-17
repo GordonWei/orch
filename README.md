@@ -529,6 +529,13 @@ npm install -g @anthropic-ai/gemini  # or: brew install gemini
 
 ## Changelog
 
+### v0.16.2 (2026-07-17)
+
+**Two more real bugs found from actual daily use, both about the gap between what orch's small local model can reliably decide on its own vs. what routing logic was blindly assuming.**
+
+- **🔴 Fixed: short Chinese input was unconditionally guessed as chat.** `router.Classify()` treated any Chinese input at or under 10 runes as chat — including task references like `那讀交接` ("then read the handoff"), which got routed straight to the local 3B model's tool-less `DirectChat()` and produced an unhelpful, ungrounded answer. This length heuristic was redundant with (and less precise than) the existing curated `type: "chat"` rules for actual greetings — none of those tests relied on it. Now config-driven via `route_rules.chat_short_input_max_len` (default `1`, just enough for bare acknowledgments like `好`); everything else falls through to keyword/CLI checks and then real MLX classification, letting the local model make an actual judgment call instead of a blind length guess. Two regression tests added, plus one confirming the config knob can restore the old behavior for anyone who wants more input to skip MLX.
+- **🔴 Fixed: the startup briefing could silently go stale indefinitely.** `memory.auto_summarize: true` implied automatic re-summarization "after each task," but no code anywhere ever called `SetBriefing()` outside the manual `orch briefing set`/`orch briefing gen` commands — a fully dead config flag. New `memory.briefing_source_file` config option (prompted during `orch init`) points at a status/handoff document you maintain by hand; when set, every startup re-reads and re-summarizes it fresh via the local model instead of trusting a cache that only updates when you remember to run `orch briefing gen`. Falls back to the last cached briefing on any failure (missing file, MLX down) rather than blocking startup. `auto_summarize` is now documented as reserved/unimplemented rather than silently doing nothing.
+
 ### v0.16.1 (2026-07-17)
 
 **Two real bugs found and fixed by dogfooding v0.16.0 with a real user config for the first time, plus a small workflow feature.**
