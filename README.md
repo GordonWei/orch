@@ -529,6 +529,14 @@ npm install -g @anthropic-ai/gemini  # or: brew install gemini
 
 ## Changelog
 
+### v0.16.1 (2026-07-17)
+
+**Two real bugs found and fixed by dogfooding v0.16.0 with a real user config for the first time, plus a small workflow feature.**
+
+- **🔴 Fixed: MLX misclassification could route natural language to a literal shell exec.** `tryMLX()`'s fallback safety net (`fixPlan()`) existed and was tested, but was never actually called from `GeneratePlan()` — pure dead code. On top of that, its own condition (`isNaturalLanguage && step.Command != userInput`) could never fire for the exact case `tryMLX()` produces (it copies the raw input verbatim into `step.Command`, so the two are always equal). Net effect: when the 3B classifier guessed `agent: shell` for something like `讀取 /path/to/file`, orch executed the literal Chinese sentence as a shell command and failed with `bash: 讀取: command not found`. Now `fixPlan()` is wired in after every MLX classification and reroutes to `claude` whenever the router's own (deterministic) classifier says the input is natural language — regardless of what the small model guessed. Two regression tests added, one of which (`TestGeneratePlan_MLXShellMisclassification_Rerouted`) spins up a mock MLX server and drives the real `GeneratePlan()` path end-to-end specifically to catch this class of "the fix exists but isn't wired up" bug in the future.
+- **🔴 Fixed: `pkg/router`/`pkg/planner` tests read the real user's `~/.config/orch/config.yaml`.** Test helpers and a package-level `var defaultRouter` all called `config.Load()`, which follows the same `ORCH_CONFIG` → `~/.config/orch/config.yaml` → built-in defaults resolution used in production — meaning `go test ./...` was never actually hermetic, it just took until a machine had a real user config (enabling Bedrock/Vertex AI, see v0.16.0 below) to surface. New exported `config.DefaultRouteRules()` gives tests (and the `classifyInputType` backward-compat shim) a pure, file-system-free fixture.
+- **`file_context` for workflow steps** — a step can now declare `file_context: [path, ...]`; the file contents are read and prepended to that step's prompt before dispatch, instead of relying on the agent to have (or use) its own file-read tool for a known path. Used to simplify `workflows/morning.yaml`'s handoff-reading step.
+
 ### v0.16.0 (2026-07-17)
 
 **Bedrock + Vertex AI Stateless API Backends — direct cloud model invocation with real cost tracking.**

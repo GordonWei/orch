@@ -335,6 +335,27 @@ steps:
 
 Built-in template variables: `{{.date}}`, `{{.time}}`, `{{.user}}`
 
+### File Context (v0.16.1+)
+
+A step can declare `file_context` — local file paths whose contents get read and prepended
+to the step's prompt before it's sent to the agent. Use this when the agent itself may not
+have (or shouldn't need) filesystem tools to read a specific known file:
+
+```yaml
+steps:
+  - id: read_handoff
+    agent: kiro
+    file_context:
+      - ~/Desktop/Cowork/docs/_agent_handoff.md
+    prompt: |
+      以上是全局交接儀表板的內容。
+      請根據這份交接檔案，回報目前狀態快照：
+```
+
+Paths support `~` expansion and template variables (`{{.date}}` etc.). If a file can't be
+read, an inline `--- FILE: <path> (read error: ...) ---` marker is injected instead of
+failing the step — check the agent's output if content looks missing.
+
 ## Troubleshooting
 
 ### MLX server fails to start
@@ -423,6 +444,17 @@ If a technical request gets answered by the local 3B model instead of cloud:
 - Use `--verbose` to see MLX classification output
 - Add relevant tech keywords to `keyword_shortcuts` in config
 - Override with `--backend kiro "your task"` for one-off
+
+### Task misrouted as a shell command (fixed in v0.16.1)
+
+Before v0.16.1, a natural-language request like `讀取 /path/to/file` could get misclassified
+by the MLX 3B model as `agent: shell`, and orch would try to execute the raw sentence as a
+literal shell command — failing with `bash: 讀取: command not found` (exit 127). `fixPlan()`
+now runs after every MLX classification and reroutes to `claude` whenever the router detects
+natural language, regardless of what the small model guessed. If you still see a shell-exec
+failure on a natural-language input on v0.16.1+, that's a new bug, not a recurrence — check
+`--verbose` output for `MLX classification raw` to see what the model actually returned, and
+whether `router.Classify()` on that exact string is returning `ClassNaturalLanguage`.
 
 ### REPL replies appear twice
 
