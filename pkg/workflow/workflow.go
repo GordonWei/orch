@@ -4,6 +4,7 @@
 package workflow
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,6 +26,7 @@ type WorkflowStep struct {
 	VerifyCmd   string   `yaml:"verify_cmd,omitempty"`
 	DependsOn   []string `yaml:"depends_on,omitempty"`
 	OnFailure   string   `yaml:"on_failure,omitempty"`
+	FileContext []string `yaml:"file_context,omitempty"` // local file paths to read and inject into prompt
 }
 
 // Triggers is a string slice that supports YAML unmarshalling from both
@@ -183,6 +185,26 @@ func ToPlanner(w *Workflow, vars map[string]string, cfg *config.Config) *planner
 		prompt := renderTemplate(ws.Prompt, allVars)
 		command := renderTemplate(ws.Command, allVars)
 		description := renderTemplate(ws.Description, allVars)
+
+		// Read file_context: inject file contents into prompt prefix
+		if len(ws.FileContext) > 0 {
+			var fileContents strings.Builder
+			for _, path := range ws.FileContext {
+				path = renderTemplate(path, allVars)
+				path = expandHome(path)
+				data, err := os.ReadFile(path)
+				if err != nil {
+					fileContents.WriteString(fmt.Sprintf("--- FILE: %s (read error: %v) ---\n\n", path, err))
+					continue
+				}
+				fileContents.WriteString(fmt.Sprintf("--- FILE: %s ---\n", path))
+				fileContents.Write(data)
+				fileContents.WriteString("\n--- END FILE ---\n\n")
+			}
+			if fileContents.Len() > 0 {
+				prompt = fileContents.String() + prompt
+			}
+		}
 
 		step := planner.Step{
 			ID:          ws.ID,

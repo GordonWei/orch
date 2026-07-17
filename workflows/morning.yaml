@@ -6,10 +6,11 @@ description: "讀取三層交接表，回報待辦清單與今日建議"
 steps:
   - id: read_handoff
     agent: kiro
+    file_context:
+      - ~/Desktop/Cowork/docs/_agent_handoff.md
     prompt: |
-      讀取以下交接檔案，回報目前狀態快照：
-      1. docs/_agent_handoff.md（全局儀表板）
-      2. 各子專案有標記 🔴 的待辦事項
+      以上是全局交接儀表板的內容。
+      請根據這份交接檔案，回報目前狀態快照：
 
       輸出格式：
       📋 今日快照
