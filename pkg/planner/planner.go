@@ -124,6 +124,10 @@ func (p *Planner) GeneratePlan(userInput string) (*Plan, error) {
 		// Use classifyInput for classification (no session context noise)
 		plan, err := p.tryMLX(classifyInput)
 		if err == nil && plan != nil {
+			// The 3B model's classification is a guess, not a guarantee — fixPlan catches
+			// cases where it picked agent="shell" for input that isn't an actual shell
+			// command (e.g. natural language it echoed verbatim into step.Command).
+			plan = p.fixPlan(plan, classifyInput)
 			fmt.Fprintf(os.Stderr, "   🍎 routed by: MLX local (Qwen 2.5 3B)\n")
 			// But use full userInput (with session context) for the actual prompt
 			if plan.Steps[0].Agent != "shell" {
@@ -478,12 +482,10 @@ func (p *Planner) fixPlan(plan *Plan, userInput string) *Plan {
 		switch step.Agent {
 		case "shell", "aws", "gcloud", "kubectl", "helm", "terraform":
 			if step.Command != "" {
-				// If user input is natural language but small model tried to generate command → reroute to claude
-				if isNaturalLanguage && step.Command != userInput {
-					step.Agent = "claude"
-					step.Prompt = userInput
-					step.Command = ""
-				} else if looksInvalid(step.Command) {
+				// If user input is natural language, it's never a real shell command —
+				// reroute to claude regardless of whether the model paraphrased it or
+				// (as tryMLX does) copied it verbatim into step.Command.
+				if isNaturalLanguage || looksInvalid(step.Command) {
 					step.Agent = "claude"
 					step.Prompt = userInput
 					step.Command = ""
@@ -524,7 +526,7 @@ func classifyInputType(input string) inputType {
 }
 
 // defaultRouter is a package-level router for backward compatibility with classifyInputType().
-var defaultRouter = router.New(config.Load().RouteRules)
+var defaultRouter = router.New(config.DefaultRouteRules())
 
 // looksInvalid checks whether command is obviously invalid
 func looksInvalid(cmd string) bool {

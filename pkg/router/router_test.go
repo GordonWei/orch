@@ -9,13 +9,15 @@ import (
 )
 
 // testRouter creates a Router with default route rules for testing.
+// Uses config.DefaultRouteRules() directly to avoid reading the user's
+// ~/.config/orch/config.yaml, which would make tests non-hermetic.
 func testRouter() *Router {
-	return New(config.Load().RouteRules)
+	return New(config.DefaultRouteRules())
 }
 
 // testRouterWithCooldown creates a Router with a specific cooldown.
 func testRouterWithCooldown(cooldown int) *Router {
-	cfg := config.Load().RouteRules
+	cfg := config.DefaultRouteRules()
 	cfg.Cooldown = cooldown
 	return New(cfg)
 }
@@ -407,7 +409,7 @@ func TestSuggestBackend_HistoryMomentum(t *testing.T) {
 // history_size to force the tie and asserts the result is stable across many
 // calls, not a coin flip per call.
 func TestSuggestBackend_HistoryMomentumDeterministicTie(t *testing.T) {
-	cfg := config.Load().RouteRules
+	cfg := config.DefaultRouteRules()
 	cfg.HistorySize = 10
 	r := New(cfg)
 
@@ -444,7 +446,7 @@ func TestSuggestBackend_NoMatch(t *testing.T) {
 // ══════════════════════════════════════════════════════════════════════════════
 
 func TestRecordInput_WindowSize(t *testing.T) {
-	cfg := config.Load().RouteRules
+	cfg := config.DefaultRouteRules()
 	cfg.HistorySize = 3 // small window for testing
 	r := New(cfg)
 

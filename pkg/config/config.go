@@ -288,7 +288,7 @@ Response rules:
 			{Prefix: "gcloud compute", Category: "query"},
 			{Prefix: "gcloud container", Category: "query"},
 		},
-		RouteRules:       defaultRouteRules(),
+		RouteRules:       DefaultRouteRules(),
 		HighRiskPatterns: DefaultHighRiskPatterns(),
 		APIBackends: APIBackendsConfig{
 			Bedrock: BedrockAPIConfig{
@@ -357,9 +357,10 @@ func DefaultHighRiskPatterns() []string {
 	}
 }
 
-// defaultRouteRules returns the full set of routing rules migrated from
+// DefaultRouteRules returns the full set of routing rules migrated from
 // route_hint.go (phrase + keyword rules) and classifyInputType (cli + chat rules).
-func defaultRouteRules() RouteRulesConfig {
+// Exported for use by tests that need a hermetic fixture (no file system access).
+func DefaultRouteRules() RouteRulesConfig {
 	return RouteRulesConfig{
 		Cooldown:    3,
 		AutoRoute:   false,

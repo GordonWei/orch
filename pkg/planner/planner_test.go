@@ -2,6 +2,8 @@ package planner
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/gordonwei/orch/pkg/backend"
@@ -652,6 +654,81 @@ func TestFixPlan_ShellToCloud(t *testing.T) {
 	}
 }
 
+// TestFixPlan_ShellToCloud_VerbatimCommand verifies that fixPlan reroutes shell steps
+// even when step.Command is an exact copy of userInput — the case tryMLX actually produces
+// (it sets Command = userInput verbatim for agent="shell", it never paraphrases). The
+// original condition `isNaturalLanguage && step.Command != userInput` could never fire for
+// this case, which is exactly the bug that let MLX misclassifications like "讀取 <path>" →
+// agent=shell reach the shell executor and fail with "command not found".
+func TestFixPlan_ShellToCloud_VerbatimCommand(t *testing.T) {
+	p := newTestPlanner(t)
+	input := "讀取 /Users/wei/Desktop/Cowork/docs/_agent_handoff.md"
+
+	plan := &Plan{
+		TaskSummary: input,
+		Difficulty:  "simple",
+		Category:    "infra",
+		Steps: []Step{
+			{
+				ID:      "step_1",
+				Agent:   "shell",
+				Command: input, // verbatim copy, as tryMLX produces
+			},
+		},
+	}
+
+	fixed := p.fixPlan(plan, input)
+	if fixed.Steps[0].Agent == "shell" {
+		t.Errorf("fixPlan should reroute natural language misclassified as shell even when command == userInput, got agent=%q", fixed.Steps[0].Agent)
+	}
+	if fixed.Steps[0].Command != "" {
+		t.Errorf("fixPlan should clear command when rerouting, got command=%q", fixed.Steps[0].Command)
+	}
+	if fixed.Steps[0].Prompt != input {
+		t.Errorf("fixPlan should set prompt to userInput when rerouting, got %q", fixed.Steps[0].Prompt)
+	}
+}
+
+// TestGeneratePlan_MLXShellMisclassification_Rerouted is an end-to-end regression test for
+// the actual bug reported by the user: MLX classifies a natural-language file-read request
+// as "shell:infra", and GeneratePlan must catch this via fixPlan before returning the plan —
+// fixPlan existed but was never called from GeneratePlan, so this reroute never happened.
+func TestGeneratePlan_MLXShellMisclassification_Rerouted(t *testing.T) {
+	mlx := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			w.WriteHeader(http.StatusOK)
+		case "/v1/chat/completions":
+			// Simulate the exact misclassification seen in production: the 3B model
+			// guesses "shell:infra" for a Chinese natural-language file-read request.
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"shell:infra"}}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mlx.Close()
+
+	p := newTestPlanner(t)
+	p.mlxEndpoint = mlx.URL
+	p.mlxModel = "test-model"
+
+	input := "讀取 /Users/wei/Desktop/Cowork/docs/_agent_handoff.md"
+	plan, err := p.GeneratePlan(input)
+	if err != nil {
+		t.Fatalf("GeneratePlan returned error: %v", err)
+	}
+	if len(plan.Steps) == 0 {
+		t.Fatal("GeneratePlan returned a plan with no steps")
+	}
+	if plan.Steps[0].Agent == "shell" {
+		t.Errorf("GeneratePlan should reroute MLX's shell misclassification away from shell, got agent=%q command=%q", plan.Steps[0].Agent, plan.Steps[0].Command)
+	}
+	if plan.Steps[0].Command != "" {
+		t.Errorf("rerouted step should have no command, got command=%q", plan.Steps[0].Command)
+	}
+}
+
 // TestFixPlan_InvalidCommand verifies that commands with placeholders get rerouted.
 func TestFixPlan_InvalidCommand(t *testing.T) {
 	p := newTestPlanner(t)
@@ -937,9 +1014,12 @@ func TestLooksInvalid(t *testing.T) {
 }
 
 // newTestPlanner creates a Planner instance for testing with minimal dependencies.
+// Uses a hardcoded config to avoid reading the user's ~/.config/orch/config.yaml.
 func newTestPlanner(t *testing.T) *Planner {
 	t.Helper()
-	cfg := config.Load()
+	cfg := &config.Config{
+		RouteRules: config.DefaultRouteRules(),
+	}
 	reg := registry.Scan()
 	br := backend.NewRegistry("")
 	p := New(reg, cfg, br, nil)
