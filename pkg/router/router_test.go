@@ -133,6 +133,60 @@ func TestClassify_Chat(t *testing.T) {
 	}
 }
 
+// TestClassify_ShortChineseNotInWhitelist_DefaultsToNaturalLanguage is a regression test
+// for a real production bug: short Chinese input that isn't a known greeting (type="chat"
+// rule) used to unconditionally classify as ClassChat if <=10 runes, regardless of content.
+// "那讀交接" ("then read the handoff") is a task reference, not a greeting, but got routed
+// straight to the local 3B model's free-form DirectChat (no tools, no session context),
+// which produced an unhelpful hallucinated answer. With ChatShortInputMaxLen defaulting to
+// 0 (disabled), this now falls through to NaturalLanguage so it reaches real planning
+// (keyword shortcuts, then MLX classification, which can itself decide local:chat if it
+// judges the input is genuinely conversational — but that's a real judgment call instead
+// of a blind length guess).
+func TestClassify_ShortChineseNotInWhitelist_DefaultsToNaturalLanguage(t *testing.T) {
+	r := testRouter() // ChatShortInputMaxLen defaults to 0 via config.DefaultRouteRules()
+
+	cases := []struct {
+		name  string
+		input string
+	}{
+		{"read_handoff_reference", "那讀交接"},
+		{"continue_task", "繼續"},
+		{"check_status", "查一下狀態"},
+		{"why_still_stale", "為何還是舊的"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := r.Classify(tc.input)
+			if got != ClassNaturalLanguage {
+				t.Errorf("Classify(%q) = %v, want ClassNaturalLanguage (short Chinese input not in the chat whitelist should not be guessed as chat)", tc.input, got)
+			}
+		})
+	}
+}
+
+// TestClassify_ShortChineseFallback_OptIn verifies the opt-in config knob still works:
+// operators who want the old unconditional short-Chinese-is-chat behavior back can set
+// chat_short_input_max_len to restore it.
+func TestClassify_ShortChineseFallback_OptIn(t *testing.T) {
+	cfg := config.DefaultRouteRules()
+	cfg.ChatShortInputMaxLen = 10
+	r := New(cfg)
+
+	got := r.Classify("那讀交接")
+	if got != ClassChat {
+		t.Errorf("Classify(%q) with chat_short_input_max_len=10 = %v, want ClassChat (opt-in fallback should apply)", "那讀交接", got)
+	}
+
+	// Still bounded by the configured length — longer natural language input
+	// shouldn't be swept in just because the knob is enabled.
+	got = r.Classify("幫我查一下今天所有會議記錄的重點內容")
+	if got != ClassNaturalLanguage {
+		t.Errorf("Classify long Chinese sentence with fallback enabled = %v, want ClassNaturalLanguage (should still respect the length bound)", got)
+	}
+}
+
 func TestClassify_NaturalLanguage(t *testing.T) {
 	r := testRouter()
 

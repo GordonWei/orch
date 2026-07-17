@@ -62,9 +62,15 @@ models:
 # === Memory Layer ===
 memory:
   db_path: "~/.config/orch/orch.db"
-  briefing_on_boot: true    # show last briefing summary on startup
-  auto_summarize: true      # auto-compress task summary into briefing after completion
+  briefing_on_boot: true    # show briefing summary on startup
   history_limit: 1000     # max history entries before auto-pruning (0=unlimited)
+  # briefing_source_file: optional path to a status/handoff doc you maintain by
+  # hand (e.g. a project dashboard). When set, briefing_on_boot re-reads and
+  # re-summarizes it fresh on every startup via the local model, instead of
+  # showing whatever was last cached by `orch briefing gen` — which only
+  # reflects orch's own task history and goes stale the moment you stop
+  # manually re-running it.
+  # briefing_source_file: "~/path/to/your/status-or-handoff.md"
 
 # === Workflow Templates ===
 # YAML workflows in this directory are loaded and matched by trigger keyword.

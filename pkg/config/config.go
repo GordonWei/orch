@@ -63,6 +63,13 @@ type RouteRulesConfig struct {
 	Cooldown    int         `yaml:"cooldown"`     // min inputs between hints
 	AutoRoute   bool        `yaml:"auto_route"`   // auto-spawn+switch
 	HistorySize int         `yaml:"history_size"` // context-aware window
+	// ChatShortInputMaxLen: fast path that treats Chinese input at or under this
+	// many runes as chat without going through MLX classification. Defaults to 1
+	// (DefaultRouteRules) — just enough to catch bare acknowledgments like "好"
+	// without also catching short task references like "那讀交接". Set to 0 to
+	// disable entirely, or raise it back toward the old unconditional behavior
+	// (previously hardcoded at 10) if you want more short input to skip MLX.
+	ChatShortInputMaxLen int `yaml:"chat_short_input_max_len"`
 }
 
 type Config struct {
@@ -147,8 +154,16 @@ type ModelDef struct {
 type MemoryConfig struct {
 	DBPath         string `yaml:"db_path"`          // path to orch.db, default ~/.config/orch/orch.db
 	BriefingOnBoot bool   `yaml:"briefing_on_boot"` // load briefing into context on start
-	AutoSummarize  bool   `yaml:"auto_summarize"`   // MLX summarize after each task
+	AutoSummarize  bool   `yaml:"auto_summarize"`   // reserved, currently unused — no code path reads this field yet; use BriefingSourceFile instead
 	HistoryLimit   int    `yaml:"history_limit"`    // max rows before pruning (0=unlimited)
+	// BriefingSourceFile: optional path to a status/handoff document (e.g. a
+	// project dashboard you maintain by hand). When set, briefing_on_boot reads
+	// and re-summarizes this file fresh on every startup instead of showing
+	// whatever was last saved via `orch briefing gen` (which only reflects
+	// orch's own task history, not external project state, and goes stale the
+	// moment you stop manually re-running it). Not set by default — this is a
+	// per-user workflow choice, not something orch assumes everyone has.
+	BriefingSourceFile string `yaml:"briefing_source_file,omitempty"`
 }
 
 type Workspace struct {
@@ -192,6 +207,7 @@ func Load() *Config {
 	cfg.LocalLLM.PythonPath = expandHome(cfg.LocalLLM.PythonPath)
 	cfg.Workspace.Root = expandHome(cfg.Workspace.Root)
 	cfg.Memory.DBPath = expandHome(cfg.Memory.DBPath)
+	cfg.Memory.BriefingSourceFile = expandHome(cfg.Memory.BriefingSourceFile)
 	cfg.Workflows.Dir = expandHome(cfg.Workflows.Dir)
 	for i := range cfg.Models {
 		cfg.Models[i].PythonPath = expandHome(cfg.Models[i].PythonPath)
@@ -365,6 +381,10 @@ func DefaultRouteRules() RouteRulesConfig {
 		Cooldown:    3,
 		AutoRoute:   false,
 		HistorySize: 5,
+		// 1 rune: catches bare acknowledgments like "好" without also catching
+		// short task references like "那讀交接" (4 runes) or "繼續" (2 runes) —
+		// see router.Classify() for the full rationale.
+		ChatShortInputMaxLen: 1,
 		Rules: []RouteRule{
 			// ══════════════════════════════════════════════════════════════
 			// PHRASE RULES (type="phrase") — multi-word patterns, checked first

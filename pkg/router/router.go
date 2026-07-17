@@ -139,7 +139,16 @@ func (r *Router) Classify(input string) InputClass {
 		}
 	}
 	if hasChinese {
-		if len([]rune(trimmed)) <= 10 {
+		// Short-circuit to chat only for input at or under chat_short_input_max_len
+		// runes (default 1 — bare acknowledgments like "好"). This used to fire
+		// unconditionally for any Chinese input <=10 runes, which swallowed short
+		// task references like "那讀交接" ("then read the handoff") as if they
+		// were greetings — none of the *known* greetings need this length check,
+		// they're already matched by the type="chat" rules above. A small default
+		// means ambiguous short Chinese input falls through to keyword/CLI checks
+		// and then to MLX classification (which can itself return local:chat for
+		// genuine chat), instead of a blind length guess deciding for it.
+		if r.cfg.ChatShortInputMaxLen > 0 && len([]rune(trimmed)) <= r.cfg.ChatShortInputMaxLen {
 			return ClassChat
 		}
 		return ClassNaturalLanguage

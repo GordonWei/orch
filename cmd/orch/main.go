@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -180,7 +181,20 @@ func main() {
 
 	// Show briefing on boot
 	if store != nil && cfg.Memory.BriefingOnBoot {
-		if brief, t, err := store.GetBriefing(); err == nil && brief != "" {
+		brief, t, err := store.GetBriefing()
+		if cfg.Memory.BriefingSourceFile != "" {
+			// A source file is configured — always re-summarize it fresh rather
+			// than trust whatever's cached, so this can never silently go stale
+			// the way a manually-triggered `orch briefing gen` does. Falls back
+			// to the last cached briefing (if any) on any failure (file missing,
+			// MLX down) instead of blocking startup.
+			if fresh, genErr := generateBriefingFromFile(cfg, store); genErr == nil {
+				brief, t, err = fresh, time.Now(), nil
+			} else if verbose {
+				fmt.Fprintf(os.Stderr, "   ⚠️  briefing_source_file: %v (showing last cached briefing)\n", genErr)
+			}
+		}
+		if err == nil && brief != "" {
 			fmt.Fprintf(os.Stderr, "📋 briefing (generated %s):\n   %s\n\n", t.Format("01/02 15:04"), brief)
 		}
 	}
@@ -394,6 +408,58 @@ func handleBriefing(subArgs []string, cfg *config.Config, store *memory.Store) {
 		fmt.Fprintf(os.Stderr, "Usage: orch briefing [set <text> | gen]\n")
 		os.Exit(1)
 	}
+}
+
+// generateBriefingFromFile reads cfg.Memory.BriefingSourceFile fresh, summarizes it via
+// the local model, and saves the result via store.SetBriefing(). Returns an error (never
+// os.Exit) so the boot path can fall back to the last cached briefing on any failure —
+// a missing file or a down MLX server on startup shouldn't block using orch.
+func generateBriefingFromFile(cfg *config.Config, store *memory.Store) (string, error) {
+	path := cfg.Memory.BriefingSourceFile
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("reading briefing_source_file %s: %w", path, err)
+	}
+
+	activeModel := cfg.ActiveModel()
+	llmClient := model.NewOpenAIClient(model.OpenAIClientConfig{
+		Endpoint: activeModel.Endpoint,
+		Model:    activeModel.Model,
+		Backend:  activeModel.Backend,
+	})
+	if !llmClient.Available() {
+		return "", fmt.Errorf("local model unavailable, cannot summarize %s", path)
+	}
+
+	prompt := fmt.Sprintf(`Here is the current content of a project status/handoff document (%s):
+
+%s
+
+Write a concise briefing (one paragraph, max 200 words) summarizing:
+1. What is currently in progress / the latest status
+2. Any items flagged as blocking or needing attention (e.g. marked 🔴)
+3. What to focus on today
+
+Output only the briefing text, no titles or formatting. Reply in the same language as the document.`, filepath.Base(path), truncateStr(string(data), 12000))
+
+	messages := []model.Message{
+		{Role: "system", Content: "You are a concise project status summarization assistant."},
+		{Role: "user", Content: prompt},
+	}
+
+	answer, err := llmClient.Chat(messages, &model.ChatOptions{
+		MaxTokens:   512,
+		Temperature: 0.3,
+	})
+	if err != nil {
+		return "", fmt.Errorf("summarizing %s: %w", path, err)
+	}
+
+	answer = strings.TrimSpace(answer)
+	if err := store.SetBriefing(answer); err != nil {
+		return "", fmt.Errorf("saving briefing: %w", err)
+	}
+	return answer, nil
 }
 
 func handleBriefingGen(cfg *config.Config, store *memory.Store) {
