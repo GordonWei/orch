@@ -336,6 +336,8 @@ memory:
 
 All AI CLI backend calls (kiro/claude/gemini) have a **5-minute timeout**. If a backend process hangs (waiting for input, rate-limited), it is automatically killed after 5 minutes with error output preserved.
 
+**MLX local model calls (v0.16.4+)**: `mlxAvailable()`'s ping to `/v1/models` has a 5s timeout; `tryMLX()`'s classification call and `DirectChat()`'s chat completion call both have a 60s timeout (`mlxPingClient` / `mlxChatClient` in `pkg/planner/planner.go`). Before v0.16.4 these used the bare `http.Get`/`http.Post` package functions with no timeout at all — a slow `mlx_lm.server` response (observed to happen unpredictably on Apple Silicon, independent of prompt size) hung the entire orch process forever. Now a slow local model produces `⚠️ MLX routing failed, falling back to cloud` (classification) or `⚠️ local chat failed: ... falling back to executor` (chat) within 60s instead of hanging — see "orch appears to hang" below.
+
 ## Workflow Templates
 
 Place YAML files in `~/.config/orch/workflows/`. Matching triggers bypass AI planning and execute directly.
@@ -378,6 +380,30 @@ failing the step — check the agent's output if content looks missing.
 
 ## Troubleshooting
 
+### orch appears to hang (never returns)
+
+Fixed in v0.16.4. Before that fix, `mlxAvailable()`/`tryMLX()`/`DirectChat()` used
+Go's bare `http.Get`/`http.Post`, which have **no timeout at all** — if `mlx_lm.server`
+hit one of its occasional slow response windows (confirmed via direct curl testing to
+happen unpredictably on Apple Silicon, independent of prompt size or content), orch
+would wait forever with no error and no fallback, indistinguishable from a crash.
+
+On v0.16.4+, a slow local model can no longer hang orch — you'll see one of:
+```
+⚠️  MLX routing failed, falling back to cloud          # classification timed out (60s)
+⚠️  local chat failed: ... falling back to executor    # DirectChat timed out (60s)
+```
+followed by orch falling through to the cloud backend or executor instead. If you're
+still seeing an unbounded hang on v0.16.4+, confirm your build includes the fix
+(`git log --oneline -1` should be at or after `v0.16.4`) — if it does and you're still
+hanging, that's a new bug, not a recurrence.
+
+If the *local model itself* is consistently slow (not just occasionally), that's a
+separate, real performance issue worth investigating on its own (thermal throttling,
+memory pressure, `mlx_lm.server` process age — restarting `mlx_lm.server` is the
+fastest way to rule out a degraded server process: `pkill -f mlx_lm.server`, then
+`orch "hello"` auto-starts a fresh one).
+
 ### MLX server fails to start
 
 ```bash
@@ -386,7 +412,7 @@ ls ~/mlx-env/bin/python3
 
 # start manually to see errors
 ~/mlx-env/bin/python3 -m mlx_lm.server \
-  --model mlx-community/Qwen2.5-3B-Instruct-4bit --port 8080
+  --model mlx-community/Qwen2.5-7B-Instruct-4bit --port 8080
 
 # port conflict
 lsof -i :8080 && kill $(lsof -ti :8080)
@@ -460,7 +486,7 @@ When you see `⚠️ session X died unexpectedly`:
 
 ### Task misrouted as chat
 
-If a technical request gets answered by the local 3B model instead of cloud:
+If a technical request gets answered by the local model instead of cloud:
 - Use `--verbose` to see MLX classification output
 - Add relevant tech keywords to `keyword_shortcuts` in config
 - Override with `--backend kiro "your task"` for one-off
@@ -478,7 +504,7 @@ input to skip MLX and go straight to chat (trades accuracy for speed); set to `0
 to disable the fast path entirely.
 
 Two related things this does **not** fix, since they're not routing bugs:
-- The local 3B model's own answer quality/language-instruction-following is a
+- The local model's own answer quality/language-instruction-following is a
   model capability limit, not something `fixPlan`/`router.Classify` controls.
 - MLX classification only ever sees the current utterance (`classifyInput`, not
   prior conversation) — so a genuine follow-up like `那讀交接` still can't be
