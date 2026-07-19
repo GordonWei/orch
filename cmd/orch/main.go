@@ -431,14 +431,24 @@ func generateBriefingFromFile(cfg *config.Config, store *memory.Store) (string, 
 		return "", fmt.Errorf("local model unavailable, cannot summarize %s", path)
 	}
 
+	// Measured on this machine's 7B model with a cold MLX server (fresh
+	// model load, no prefix cache): a 24000-char prompt did not finish
+	// within 150s. Keeping this close to the original, already-tested
+	// 12000-char/200-word budget trades completeness (a long handoff doc
+	// gets truncated before covering every section) for staying reliably
+	// fast on every boot — DirectChat now actually receives whatever this
+	// produces (see SetBriefing wiring in runTask), so even a partial
+	// summary is a real improvement over the previous behavior of not
+	// reaching the model at all.
 	prompt := fmt.Sprintf(`Here is the current content of a project status/handoff document (%s):
 
 %s
 
-Write a concise briefing (one paragraph, max 200 words) summarizing:
+Write a concise briefing (max 220 words) summarizing:
 1. What is currently in progress / the latest status
 2. Any items flagged as blocking or needing attention (e.g. marked 🔴)
-3. What to focus on today
+3. Distinct pending/to-do items, listed individually where space allows
+4. What to focus on today
 
 Output only the briefing text, no titles or formatting. Reply in the same language as the document.`, filepath.Base(path), truncateStr(string(data), 12000))
 
@@ -447,6 +457,10 @@ Output only the briefing text, no titles or formatting. Reply in the same langua
 		{Role: "user", Content: prompt},
 	}
 
+	// Measured on this machine's 7B model: local decode runs at roughly
+	// 16 tokens/sec, so this budget already costs up to ~32s in the worst
+	// case on every orch boot (briefing_source_file is re-summarized fresh
+	// every time) — higher risks the boot itself feeling hung.
 	answer, err := llmClient.Chat(messages, &model.ChatOptions{
 		MaxTokens:   512,
 		Temperature: 0.3,
@@ -618,6 +632,15 @@ func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, st
 	r := router.New(cfg.RouteRules)
 	p := planner.New(reg, cfg, br, r)
 	p.Verbose = verbose
+	if store != nil {
+		// Ground DirectChat in whatever briefing is currently cached (kept
+		// fresh on boot when cfg.Memory.BriefingSourceFile is set — see
+		// generateBriefingFromFile) instead of the model answering "what's
+		// pending" from nothing.
+		if brief, _, err := store.GetBriefing(); err == nil {
+			p.SetBriefing(brief)
+		}
+	}
 	plan, err := p.GeneratePlan(prompt)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ planning failed: %v\n", err)
@@ -1078,10 +1101,15 @@ func promptApproval(command string) bool {
 	}
 }
 
+// truncateStr truncates s to at most max runes (not bytes) so CJK text isn't
+// cut mid-character into invalid UTF-8 — this codebase is CJK-heavy (handoff
+// docs, task summaries, prompts) and a byte-slice truncation here previously
+// risked feeding a broken multi-byte sequence straight into MLX request JSON.
 func truncateStr(s string, max int) string {
 	s = strings.TrimSpace(s)
-	if len(s) <= max {
+	r := []rune(s)
+	if len(r) <= max {
 		return s
 	}
-	return s[:max] + "..."
+	return string(r[:max]) + "..."
 }

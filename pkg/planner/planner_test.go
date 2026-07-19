@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gordonwei/orch/pkg/backend"
 	"github.com/gordonwei/orch/pkg/config"
@@ -1221,6 +1222,121 @@ func TestLooksInvalid(t *testing.T) {
 				t.Errorf("looksInvalid(%q) = %v, want %v", tc.input, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestModelDisplayName is a regression test for the "routed by" line hardcoding
+// "Qwen 2.5 3B" regardless of which model was actually configured — once the
+// default model was upgraded to 7B (or any other model a user configures), the
+// label kept claiming 3B, which is actively misleading when debugging routing.
+func TestModelDisplayName(t *testing.T) {
+	cases := []struct {
+		model string
+		want  string
+	}{
+		{"mlx-community/Qwen2.5-3B-Instruct-4bit", "Qwen2.5-3B"},
+		{"mlx-community/Qwen2.5-7B-Instruct-4bit", "Qwen2.5-7B"},
+		{"mlx-community/Llama-3.1-8B-Instruct-8bit", "Llama-3.1-8B"},
+		{"some-custom-model-id", "some-custom-model-id"},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.model, func(t *testing.T) {
+			if got := modelDisplayName(tc.model); got != tc.want {
+				t.Errorf("modelDisplayName(%q) = %q, want %q", tc.model, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBuildDirectChatSystemPrompt_IncludesDateAndBriefing is a regression test
+// for two real bugs found in production use: (1) DirectChat's system prompt
+// never included today's date, so the model guessed at "tomorrow" from stale
+// training data (observed guessing "2023" on 2026-07-17); (2) the briefing
+// generated from cfg.Memory.BriefingSourceFile was only ever printed to the
+// terminal for the human to read and never reached the model itself, so
+// questions like "what's still pending" got an answer made up from nothing.
+func TestBuildDirectChatSystemPrompt_IncludesDateAndBriefing(t *testing.T) {
+	p := newTestPlanner(t)
+
+	withoutBriefing := p.buildDirectChatSystemPrompt()
+	if !strings.Contains(withoutBriefing, "Today's date is") {
+		t.Errorf("expected system prompt to include today's date, got: %s", withoutBriefing)
+	}
+
+	p.SetBriefing("Kiro 尚未收尾 orch v0.16.3；momo 有 2 場會議待人工確認。")
+	withBriefing := p.buildDirectChatSystemPrompt()
+	if !strings.Contains(withBriefing, "momo 有 2 場會議待人工確認") {
+		t.Errorf("expected system prompt to include the briefing text, got: %s", withBriefing)
+	}
+	if !strings.Contains(withBriefing, "Today's date is") {
+		t.Errorf("expected system prompt to still include today's date alongside the briefing, got: %s", withBriefing)
+	}
+}
+
+// TestMlxHTTPClients_HaveTimeouts is a regression test for the actual root
+// cause behind orch appearing to "hang" on chat replies: mlxAvailable(),
+// tryMLX(), and DirectChat() used the bare http.Get/http.Post package
+// functions, which go through http.DefaultClient — Timeout: 0, meaning no
+// timeout at all. mlx_lm.server on Apple Silicon was observed to have
+// occasional, unpredictable slow responses to /v1/chat/completions (confirmed
+// via direct curl testing bypassing orch entirely — the same request that
+// took 6s once took over 60s another time with nothing else changed). With
+// no client-side timeout, hitting one of those slow windows hung the whole
+// orch process forever, indistinguishable from a crash, with no error and no
+// fallback. This just guards against silently reverting to the zero-timeout
+// default.
+func TestMlxHTTPClients_HaveTimeouts(t *testing.T) {
+	if mlxPingClient.Timeout <= 0 {
+		t.Error("mlxPingClient must have a non-zero Timeout (mlxAvailable should never hang forever)")
+	}
+	if mlxChatClient.Timeout <= 0 {
+		t.Error("mlxChatClient must have a non-zero Timeout (tryMLX/DirectChat should never hang forever)")
+	}
+}
+
+// TestDirectChat_TimesOutOnSlowServer_RatherThanHanging exercises the timeout
+// end-to-end against a server that never responds, temporarily shortening
+// mlxChatClient's timeout so the test doesn't itself take 60s. Without the
+// fix this test would hang for the test binary's entire default timeout.
+func TestDirectChat_TimesOutOnSlowServer_RatherThanHanging(t *testing.T) {
+	block := make(chan struct{})
+
+	mlx := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			w.WriteHeader(http.StatusOK)
+		case "/v1/chat/completions":
+			<-block // never respond until the test unblocks it below
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	// httptest.Server.Close() blocks until in-flight handlers return, so the
+	// unblocking close(block) must run BEFORE mlx.Close() — t.Cleanup runs
+	// LIFO, so registering Close() first and close(block) second makes
+	// close(block) fire first. Registering these in the wrong order deadlocks
+	// the whole test (found by hitting exactly this while writing the test).
+	t.Cleanup(func() { mlx.Close() })
+	t.Cleanup(func() { close(block) })
+
+	originalTimeout := mlxChatClient.Timeout
+	mlxChatClient.Timeout = 300 * time.Millisecond
+	t.Cleanup(func() { mlxChatClient.Timeout = originalTimeout })
+
+	p := newTestPlanner(t)
+	p.mlxEndpoint = mlx.URL
+	p.mlxModel = "test-model"
+
+	start := time.Now()
+	_, err := p.DirectChat("你好")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected DirectChat to return an error when the server never responds, got nil")
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("DirectChat took %s to return an error — expected it to respect the client timeout instead of hanging", elapsed)
 	}
 }
 

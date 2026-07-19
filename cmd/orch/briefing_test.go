@@ -85,6 +85,23 @@ func TestGenerateBriefingFromFile_MissingFile(t *testing.T) {
 	}
 }
 
+// TestTruncateStr_RuneSafe is a regression test for a latent bug: truncateStr
+// used len(s) (byte length) and s[:max] (byte slice), which for CJK text (3
+// bytes/character in UTF-8) can cut through the middle of a multi-byte
+// character and produce invalid UTF-8. This matters here specifically because
+// generateBriefingFromFile feeds a truncated handoff document (routinely
+// CJK-heavy) straight into the MLX request JSON.
+func TestTruncateStr_RuneSafe(t *testing.T) {
+	// 5 three-byte CJK characters, truncate to 3 runes: a byte-based cut at
+	// index 3 would land mid-character; a rune-based cut must not.
+	s := "交接清單摘要"
+	got := truncateStr(s, 3)
+	want := "交接清..."
+	if got != want {
+		t.Errorf("truncateStr(%q, 3) = %q, want %q", s, got, want)
+	}
+}
+
 // TestGenerateBriefingFromFile_MLXUnavailable verifies an unreachable local
 // model returns an error instead of hanging or panicking.
 func TestGenerateBriefingFromFile_MLXUnavailable(t *testing.T) {

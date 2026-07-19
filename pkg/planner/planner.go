@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/gordonwei/orch/pkg/backend"
 	"github.com/gordonwei/orch/pkg/config"
@@ -82,6 +83,20 @@ type Planner struct {
 	mlxEndpoint string
 	mlxModel    string
 	Verbose     bool
+	// briefing holds the caller-supplied project status/handoff summary (see
+	// SetBriefing) so DirectChat can actually answer questions about pending
+	// work instead of guessing — previously this text was only ever printed
+	// to the terminal on boot and never reached the model itself.
+	briefing string
+}
+
+// SetBriefing gives the planner the current project status/handoff summary
+// (typically memory.Store.GetBriefing(), refreshed from
+// cfg.Memory.BriefingSourceFile on boot) so DirectChat can ground answers
+// about pending tasks in it. Optional — callers that never set this get the
+// prior behavior (no project context in direct chat).
+func (p *Planner) SetBriefing(b string) {
+	p.briefing = b
 }
 
 func New(reg *registry.Registry, cfg *config.Config, br *backend.Registry, r *router.Router) *Planner {
@@ -127,11 +142,11 @@ func (p *Planner) GeneratePlan(userInput string) (*Plan, error) {
 		// blind — see extractRecentContextHint.
 		plan, err := p.tryMLX(classifyInput, extractRecentContextHint(userInput))
 		if err == nil && plan != nil {
-			// The 3B model's classification is a guess, not a guarantee — fixPlan catches
+			// The local model's classification is a guess, not a guarantee — fixPlan catches
 			// cases where it picked agent="shell" for input that isn't an actual shell
 			// command (e.g. natural language it echoed verbatim into step.Command).
 			plan = p.fixPlan(plan, classifyInput)
-			fmt.Fprintf(os.Stderr, "   🍎 routed by: MLX local (Qwen 2.5 3B)\n")
+			fmt.Fprintf(os.Stderr, "   🍎 routed by: MLX local (%s)\n", modelDisplayName(p.mlxModel))
 			// But use full userInput (with session context) for the actual prompt
 			if plan.Steps[0].Agent != "shell" {
 				plan.Steps[0].Prompt = userInput
@@ -157,12 +172,35 @@ func (p *Planner) GeneratePlan(userInput string) (*Plan, error) {
 	return p.tryCloud(userInput)
 }
 
+// modelDisplayName turns a full model identifier (e.g.
+// "mlx-community/Qwen2.5-7B-Instruct-4bit") into a short label for the
+// "routed by" line (e.g. "Qwen2.5-7B"). Falls back to the raw string for
+// identifiers that don't match the "<org>/<name>-Instruct-<quant>" shape
+// instead of guessing — this must stay generic since orch users configure
+// arbitrary MLX models, not just Qwen.
+func modelDisplayName(model string) string {
+	name := model
+	if idx := strings.LastIndex(name, "/"); idx != -1 {
+		name = name[idx+1:]
+	}
+	for _, suffix := range []string{"-Instruct-4bit", "-Instruct-8bit", "-Instruct", "-4bit", "-8bit"} {
+		if strings.HasSuffix(name, suffix) {
+			name = strings.TrimSuffix(name, suffix)
+			break
+		}
+	}
+	if name == "" {
+		return model
+	}
+	return name
+}
+
 // extractRecentContextHint pulls a short, bounded hint of the single most recent
 // prior turn out of a REPL-wrapped userInput (see repl.go's enrichedInput format:
 // "[Prior conversation for context]\n<turns joined by \n---\n>\n[End prior
 // conversation]\n\nCurrent request: <input>"). Returns "" if userInput has no such
 // wrapper (e.g. one-shot invocations), so MLX classification of a fresh session's
-// first message is unaffected. Bounded to keep the 3B model's classify-only prompt
+// first message is unaffected. Bounded to keep the local model's classify-only prompt
 // small — this is a hint for resolving pronouns/ellipsis in short follow-ups, not a
 // full conversation replay.
 func extractRecentContextHint(userInput string) string {
@@ -320,9 +358,22 @@ func (p *Planner) tryKeywordPlan(input string) *Plan {
 
 // ===== Layer 2: MLX LM Server (OpenAI-compatible local API) =====
 
+// mlxPingClient and mlxChatClient replace the bare http.Get/http.Post calls
+// this file used to make (which go through http.DefaultClient — Timeout: 0,
+// i.e. no timeout at all). Found via direct investigation: mlx_lm.server on
+// Apple Silicon has occasional, unpredictable slow requests to
+// /v1/chat/completions (not /v1/models, which is always instant) — with no
+// client-side timeout, a request that lands in one of those slow windows
+// hangs orch forever with no error and no fallback, indistinguishable from a
+// crash. A generous but finite timeout turns that into a clean error instead.
+var (
+	mlxPingClient = &http.Client{Timeout: 5 * time.Second}
+	mlxChatClient = &http.Client{Timeout: 60 * time.Second}
+)
+
 func (p *Planner) mlxAvailable() bool {
 	// Try to ping mlx_lm.server
-	resp, err := http.Get(p.mlxEndpoint + "/v1/models")
+	resp, err := mlxPingClient.Get(p.mlxEndpoint + "/v1/models")
 	if err != nil {
 		return false
 	}
@@ -333,7 +384,7 @@ func (p *Planner) mlxAvailable() bool {
 func (p *Planner) tryMLX(userInput string, recentContext string) (*Plan, error) {
 	// Strategy: ask the small model to output ONLY a classification line.
 	// Format: "agent:category" e.g., "local:chat", "kiro:infra", "claude:docs"
-	// This is far more reliable than asking a 3B model to generate valid JSON.
+	// This is far more reliable than asking a small model to generate valid JSON.
 
 	systemPrompt := `You are a task classifier. Given a user request, output EXACTLY one line with the format:
 agent:category
@@ -348,6 +399,10 @@ RULES:
 - kiro:code → code generation, debugging, file operations, build, test
 - claude:docs → writing, analysis, meeting notes, Notion sync
 - claude:query → complex questions needing deep reasoning
+- claude:query → questions needing real-time or externally-sourced information that
+  goes stale (weather, news, stock/exchange prices, sports scores, "what time/date
+  is it in X", current events) — NEVER local:chat, since the local model has no way
+  to look this up and will just make up an answer
 - gemini:docs → very long document summarization
 - bedrock:api → user explicitly requests Bedrock, or task needs direct cloud model API (e.g., "用 bedrock", "bedrock 翻譯")
 - vertexai:api → user explicitly requests Vertex AI, or task needs Gemini model via API (e.g., "用 vertex", "vertex 分析")
@@ -367,7 +422,8 @@ local:chat
 kiro:infra
 shell:infra
 claude:docs
-bedrock:api`
+bedrock:api
+台中明天天氣 -> claude:query`
 
 	userContent := userInput
 	if recentContext != "" {
@@ -394,7 +450,7 @@ bedrock:api`
 		return nil, err
 	}
 
-	resp, err := http.Post(p.mlxEndpoint+"/v1/chat/completions", "application/json", bytes.NewReader(body))
+	resp, err := mlxChatClient.Post(p.mlxEndpoint+"/v1/chat/completions", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("mlx server unreachable: %w", err)
 	}
@@ -714,13 +770,32 @@ Respond ONLY with valid JSON matching this schema:
 }`, toolsSummary)
 }
 
+// buildDirectChatSystemPrompt prepends the current date and (if SetBriefing
+// was called) the project status summary to the configured persona system
+// prompt. Without the date, the model has no way to resolve "today"/
+// "tomorrow" and guesses from stale training data; without the briefing, it
+// has no way to answer "what's on my to-do list" and guesses that too — both
+// were previously missing entirely.
+func (p *Planner) buildDirectChatSystemPrompt() string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Today's date is %s.\n", time.Now().Format("2006-01-02 (Monday)")))
+	if p.briefing != "" {
+		sb.WriteString("\nCurrent project status (use this to answer questions about pending work, handoffs, or to-dos; don't invent tasks not listed here):\n")
+		sb.WriteString(p.briefing)
+		sb.WriteString("\n")
+	}
+	sb.WriteString("\n")
+	sb.WriteString(p.cfg.Persona.SystemPrompt)
+	return sb.String()
+}
+
 // DirectChat uses local MLX to directly answer general chat (bypasses plan→execute)
 func (p *Planner) DirectChat(userInput string) (string, error) {
 	if !p.mlxAvailable() {
 		return "", fmt.Errorf("MLX server not available for direct chat")
 	}
 
-	systemPrompt := p.cfg.Persona.SystemPrompt
+	systemPrompt := p.buildDirectChatSystemPrompt()
 
 	reqBody := map[string]interface{}{
 		"model": p.mlxModel,
@@ -728,9 +803,15 @@ func (p *Planner) DirectChat(userInput string) (string, error) {
 			{"role": "system", "content": systemPrompt},
 			{"role": "user", "content": userInput},
 		},
-		"max_tokens":         2048,
-		"temperature":        0.7,
-		"repetition_penalty": 1.3,
+		// 2048 was the original budget, but local decode on Apple Silicon
+		// (measured ~16 tokens/sec on a 7B q4 model) means a reply that
+		// doesn't hit a natural stop token can legitimately take ~2 minutes
+		// before returning — indistinguishable from a hang to the caller.
+		// 400 tokens covers a normal chat-length answer while keeping the
+		// worst case to well under 30s.
+		"max_tokens":              400,
+		"temperature":             0.7,
+		"repetition_penalty":      1.3,
 		"repetition_context_size": 128,
 	}
 
@@ -739,11 +820,12 @@ func (p *Planner) DirectChat(userInput string) (string, error) {
 		return "", err
 	}
 
-	resp, err := http.Post(p.mlxEndpoint+"/v1/chat/completions", "application/json", bytes.NewReader(body))
+	resp, err := mlxChatClient.Post(p.mlxEndpoint+"/v1/chat/completions", "application/json", bytes.NewReader(body))
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("mlx server unreachable or timed out: %w", err)
 	}
 	defer resp.Body.Close()
+	fmt.Fprintf(os.Stderr, "[DIAG] response status=%d\n", resp.StatusCode)
 
 	var result struct {
 		Choices []struct {
