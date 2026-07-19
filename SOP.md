@@ -336,7 +336,7 @@ memory:
 
 All AI CLI backend calls (kiro/claude/gemini) have a **5-minute timeout**. If a backend process hangs (waiting for input, rate-limited), it is automatically killed after 5 minutes with error output preserved.
 
-**MLX local model calls (v0.16.4+)**: `mlxAvailable()`'s ping to `/v1/models` has a 5s timeout; `tryMLX()`'s classification call and `DirectChat()`'s chat completion call both have a 60s timeout (`mlxPingClient` / `mlxChatClient` in `pkg/planner/planner.go`). Before v0.16.4 these used the bare `http.Get`/`http.Post` package functions with no timeout at all — a slow `mlx_lm.server` response (observed to happen unpredictably on Apple Silicon, independent of prompt size) hung the entire orch process forever. Now a slow local model produces `⚠️ MLX routing failed, falling back to cloud` (classification) or `⚠️ local chat failed: ... falling back to executor` (chat) within 60s instead of hanging — see "orch appears to hang" below.
+**MLX local model calls (v0.16.4+)**: the ping to `/v1/models` gets 5s, classification and `DirectChat()` both get 60s (`mlxPingClient` / `mlxChatClient` in `pkg/planner/planner.go`). Before v0.16.4 these went through Go's bare `http.Get`/`http.Post` — no timeout at all — so a slow `mlx_lm.server` response just hung orch forever. See "orch appears to hang" below.
 
 ## Workflow Templates
 
@@ -382,27 +382,26 @@ failing the step — check the agent's output if content looks missing.
 
 ### orch appears to hang (never returns)
 
-Fixed in v0.16.4. Before that fix, `mlxAvailable()`/`tryMLX()`/`DirectChat()` used
-Go's bare `http.Get`/`http.Post`, which have **no timeout at all** — if `mlx_lm.server`
-hit one of its occasional slow response windows (confirmed via direct curl testing to
-happen unpredictably on Apple Silicon, independent of prompt size or content), orch
-would wait forever with no error and no fallback, indistinguishable from a crash.
+Fixed in v0.16.4. `mlxAvailable()`/`tryMLX()`/`DirectChat()` used to call MLX through
+Go's bare `http.Get`/`http.Post` — no timeout, ever. `mlx_lm.server` has moments where
+it just goes quiet on `/v1/chat/completions` for no obvious reason (same request, same
+size, 6s one time and never-returns the next), and with nothing capping the wait on our
+side, that took the whole orch process down with it — no error, nothing, looked exactly
+like a crash.
 
-On v0.16.4+, a slow local model can no longer hang orch — you'll see one of:
+Now a slow local model can't do that. You'll see one of:
 ```
 ⚠️  MLX routing failed, falling back to cloud          # classification timed out (60s)
 ⚠️  local chat failed: ... falling back to executor    # DirectChat timed out (60s)
 ```
-followed by orch falling through to the cloud backend or executor instead. If you're
-still seeing an unbounded hang on v0.16.4+, confirm your build includes the fix
-(`git log --oneline -1` should be at or after `v0.16.4`) — if it does and you're still
-hanging, that's a new bug, not a recurrence.
+and orch falls through to cloud or the executor instead. Still hanging on v0.16.4+?
+Check `git log --oneline -1` is at or after v0.16.4 first — if it is, that's a new bug,
+not the old one back.
 
-If the *local model itself* is consistently slow (not just occasionally), that's a
-separate, real performance issue worth investigating on its own (thermal throttling,
-memory pressure, `mlx_lm.server` process age — restarting `mlx_lm.server` is the
-fastest way to rule out a degraded server process: `pkill -f mlx_lm.server`, then
-`orch "hello"` auto-starts a fresh one).
+If the local model is *always* slow, not just occasionally, that's a different problem
+worth chasing on its own (thermal throttling, memory pressure, a stale `mlx_lm.server`
+process). Quickest check: `pkill -f mlx_lm.server`, then `orch "hello"` to spin up a
+fresh one.
 
 ### MLX server fails to start
 
