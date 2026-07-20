@@ -521,6 +521,43 @@ failure on a natural-language input on v0.16.1+, that's a new bug, not a recurre
 `--verbose` output for `MLX classification raw` to see what the model actually returned, and
 whether `router.Classify()` on that exact string is returning `ClassNaturalLanguage`.
 
+### "讀交接" (or similar "read this doc/log/status") dumps the raw file instead of a summary (fixed in v0.17.1)
+
+Before v0.17.1, once routing correctly classified a request like `那讀交接` as `category: docs`
+(no longer misrouted to chat — see above), the Layer 3 cloud planner still had no reason to
+prefer anything over the most literal reading: `agent: shell, command: cat <file>`. Routing was
+"correct" but the user got the entire raw file dumped to the terminal instead of an answer.
+`buildSystemPrompt()` now tells the planner to prefer `kiro`/`claude` with a "read this file and
+summarize" prompt whenever the request is about understanding a document's content/state, and to
+only use a bare shell cat/less step when the user explicitly asks for the raw/full text. This is a
+prompt-level heuristic, not a deterministic rule — if you hit a case where it still dumps raw
+output for what looks like a summarization request, check `--dry-run` to see what step the
+planner actually generated before assuming it's the same bug recurring.
+
+### `--backend gemini` / `/session gemini` fails immediately with a CLI arg error (fixed in v0.17.1)
+
+Before v0.17.1, both the `gemini` API backend (`pkg/backend/backend.go`) and `/session gemini`
+(`pkg/session/session.go`) hardcoded `gemini --skip-trust ...`. Google's gemini CLI has since
+dropped that flag — running it now fails immediately with the CLI's own
+`Unknown arguments: skip-trust, skipTrust` error instead of doing anything. Both call sites now
+use `--yolo` instead (same "don't prompt me, just do it" effect). If this recurs, it means the
+gemini CLI changed its flags again — run `gemini --help` and check what `-y`/`--yolo` and
+`--approval-mode` currently look like before assuming it's an orch bug.
+
+### Backend replies show raw ANSI codes or a stray `> ` at the start (fixed in v0.17.1)
+
+`kiro`/`claude`/`gemini` are built for a live TTY and print their own colored chrome (kiro-cli's
+`> ` prompt in particular) even when their stdout is captured non-interactively via
+`exec.Command`. Before v0.17.1, `runCmd()` in `pkg/backend/backend.go` returned that captured
+output verbatim, so those escape codes and the leading `> ` ended up printed as if they were part
+of the answer. `runCmd()` now strips ANSI via the same `session.StripState` logic the PTY session
+path has used since v0.10.1, and `KiroBackend.Execute()` additionally trims the leading `> ` that
+remains once the color codes around it are gone (plain text, not an escape sequence — stripANSI
+alone doesn't remove it). If you see this again on kiro/claude/gemini output, check with
+`hexdump -C` on a file-redirected capture before assuming it's a display-tool artifact — a rough
+`od -c` read of this exact symptom on macOS/BSD once turned out to be a false positive from CJK
+character rendering, not real corrupted bytes.
+
 ### REPL replies appear twice
 
 Output printing lives in exactly one place: `runTask` (cmd/orch/main.go) prints task/chat
