@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gordonwei/orch/pkg/config"
+	"github.com/gordonwei/orch/pkg/hooks"
 	"github.com/gordonwei/orch/pkg/planner"
 )
 
@@ -641,5 +642,55 @@ func TestNoDepsRunsImmediately(t *testing.T) {
 	}
 	if result.Steps[0].Output != "immediate\n" {
 		t.Errorf("output = %q, want 'immediate\\n'", result.Steps[0].Output)
+	}
+}
+
+// TestApprovalGateSurvivesUnrelatedHook locks in the "hooks are additive, not a
+// replacement" fix. Before the fix, configuring ANY pre_execute hook — even one
+// with no connection to safety (logging, notifications, etc.) — silently disabled
+// the built-in interactive approval prompt for high-risk commands (terraform
+// destroy, rm -rf, ...), because the two gates were wired as if/else instead of
+// both running. A user who just wanted a logging hook would unknowingly lose the
+// destructive-command confirmation for every future step.
+func TestApprovalGateSurvivesUnrelatedHook(t *testing.T) {
+	cfg := testConfig()
+	cfg.HighRiskPatterns = []string{"rm -rf"}
+	e := New(cfg, nil)
+
+	// A pre_execute hook that has nothing to do with approval: always exits 0,
+	// never blocks. Simulates a user who added logging/notification hooks.
+	e.HookRunner = hooks.NewRunner(hooks.HooksConfig{
+		"pre_execute": []hooks.HookDef{
+			{Name: "unrelated-logger", Command: "true", Timeout: 5},
+		},
+	})
+
+	var approvalCalled bool
+	e.ApprovalFunc = func(command string) bool {
+		approvalCalled = true
+		return false // deny
+	}
+
+	plan := &planner.Plan{
+		TaskSummary: "risky",
+		Steps: []planner.Step{
+			{
+				ID:      "danger",
+				Agent:   "shell",
+				Command: "rm -rf /tmp/orch-test-should-not-run",
+			},
+		},
+	}
+
+	result := e.Execute(plan)
+
+	if !approvalCalled {
+		t.Fatal("ApprovalFunc was never called — unrelated pre_execute hook silently bypassed the high-risk approval gate")
+	}
+	if result.Success {
+		t.Fatal("expected failure: ApprovalFunc denied the command, step must not succeed")
+	}
+	if result.Steps[0].Err == nil {
+		t.Fatal("expected step error for denied high-risk command")
 	}
 }

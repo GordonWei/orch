@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 	"github.com/gordonwei/orch/pkg/config"
 	"github.com/gordonwei/orch/pkg/eventbus"
 	"github.com/gordonwei/orch/pkg/executor"
+	"github.com/gordonwei/orch/pkg/hooks"
 	"github.com/gordonwei/orch/pkg/memory"
 	"github.com/gordonwei/orch/pkg/registry"
 	"github.com/gordonwei/orch/pkg/router"
@@ -90,6 +92,21 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br
 	fmt.Fprintf(rl.Stdout(), "🟢 orch %s — AI Chief of Staff\n", version)
 	fmt.Fprintf(rl.Stdout(), "   tools: %s\n", toolNames(reg))
 	fmt.Fprintf(rl.Stdout(), "   type your request, /help for commands, ctrl+d to quit\n\n")
+
+	// --- on_session_start hooks ---
+	if hookRunner != nil && hookRunner.HasHooks(hooks.OnSessionStart) {
+		cwd, _ := os.Getwd()
+		hookResults, err := hookRunner.Run(context.Background(), hooks.HookEvent{
+			Trigger: hooks.OnSessionStart,
+			Cwd:     cwd,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "⚠️  on_session_start hook error: %v\n", err)
+		}
+		if stdout := hooks.CombinedStdout(hookResults); stdout != "" {
+			fmt.Fprintf(os.Stderr, "📎 %s\n\n", stdout)
+		}
+	}
 
 	for {
 		// Update prompt based on session mode
@@ -235,6 +252,24 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br
 		}
 
 		// === Normal mode: existing planner behavior ===
+
+		// --- pre_route hooks ---
+		if hookRunner != nil && hookRunner.HasHooks(hooks.PreRoute) {
+			cwd, _ := os.Getwd()
+			hookResults, hookErr := hookRunner.Run(context.Background(), hooks.HookEvent{
+				Trigger: hooks.PreRoute,
+				Input:   input,
+				Cwd:     cwd,
+			})
+			if hookErr != nil {
+				fmt.Fprintf(os.Stderr, "⚠️  pre_route hook error: %v\n", hookErr)
+			}
+			if hooks.Blocked(hookResults) {
+				fmt.Fprintf(os.Stderr, "🚫 blocked by hook: %s\n", hooks.BlockReason(hookResults))
+				continue
+			}
+		}
+
 		sessionCtx := replSession.buildContext()
 		enrichedInput := input
 		if sessionCtx != "" {
@@ -244,6 +279,23 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br
 		_, output := runTask(nil, reg, cfg, store, br, apiBackends, bus, enrichedInput, false)
 		replSession.add(input, output)
 		fmt.Fprintln(os.Stderr)
+	}
+
+	// --- on_session_end hooks ---
+	if hookRunner != nil && hookRunner.HasHooks(hooks.OnSessionEnd) {
+		cwd, _ := os.Getwd()
+		hookResults, err := hookRunner.Run(context.Background(), hooks.HookEvent{
+			Trigger: hooks.OnSessionEnd,
+			Cwd:     cwd,
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "⚠️  on_session_end hook error: %v\n", err)
+		}
+		for _, hr := range hookResults {
+			if hr.Err != nil {
+				fmt.Fprintf(os.Stderr, "⚠️  hook %q: %v\n", hr.Name, hr.Err)
+			}
+		}
 	}
 
 	fmt.Fprintln(os.Stderr, "👋 bye")

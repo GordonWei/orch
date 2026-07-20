@@ -89,6 +89,20 @@ type Config struct {
 	// in config.yaml to add or replace patterns without a rebuild.
 	HighRiskPatterns []string          `yaml:"high_risk_patterns"`
 	APIBackends      APIBackendsConfig `yaml:"api_backends"`
+
+	// Hooks defines user-configurable shell scripts triggered at specific
+	// lifecycle points (pre_route, pre_execute, post_execute, on_session_start,
+	// on_session_end). See pkg/hooks for details.
+	Hooks map[string][]HookDef `yaml:"hooks"`
+}
+
+// HookDef mirrors hooks.HookDef for config parsing. The config package cannot
+// import pkg/hooks (would create a cycle), so we define a parallel struct here.
+type HookDef struct {
+	Name           string `yaml:"name"`
+	Command        string `yaml:"command"`
+	Timeout        int    `yaml:"timeout"`
+	BlockOnFailure bool   `yaml:"block_on_failure"`
 }
 
 // AIBackendConfig defines which AI CLI backend to use for cloud planning/execution.
@@ -677,10 +691,16 @@ func DefaultRouteRules() RouteRulesConfig {
 	}
 }
 
-func expandHome(path string) string {
+// ExpandHome replaces leading ~ with the user's home directory.
+func ExpandHome(path string) string {
 	if strings.HasPrefix(path, "~/") {
 		home, _ := os.UserHomeDir()
 		return filepath.Join(home, path[2:])
 	}
 	return path
+}
+
+// expandHome is the unexported alias for internal callers.
+func expandHome(path string) string {
+	return ExpandHome(path)
 }

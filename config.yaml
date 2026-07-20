@@ -100,24 +100,24 @@ workflows:
 # === Route Rules (v0.14+) ===
 # The default config ships with ~120 rules covering claude/kiro/gemini/shell/local.
 # Add custom rules here — they MERGE with defaults (do not override them).
-# route_rules:
-#   cooldown: 3
-#   auto_route: false
-#   history_size: 5
-#   rules:
-#     # Gemini examples (v0.14 built-in):
-#     - pattern: "用 gemini"
-#       target: gemini
-#       strength: 3
-#       type: phrase
-#     - pattern: "google drive"
-#       target: gemini
-#       strength: 3
-#       type: phrase
-#     - pattern: summarize
-#       target: gemini
-#       strength: 2
-#       type: keyword
+route_rules:
+  cooldown: 3
+  auto_route: false
+  history_size: 5
+  rules:
+    # Bedrock route rules — start accumulating cost data for 10/31 demo
+    - pattern: "用 bedrock"
+      target: bedrock
+      strength: 3
+      type: phrase
+    - pattern: "ask bedrock"
+      target: bedrock
+      strength: 3
+      type: phrase
+    - pattern: "bedrock"
+      target: bedrock
+      strength: 3
+      type: keyword
 
 # === Keyword Shortcuts ===
 # Commands matching these prefixes bypass AI planning entirely (Layer 1).
@@ -159,7 +159,7 @@ keyword_shortcuts:
 # Usage tracking is automatic — see `orch cost` to view statistics.
 api_backends:
   bedrock:
-    enabled: false
+    enabled: true
     region: "us-east-1"
     model_id: "us.anthropic.claude-haiku-4-5-20251001-v1:0"
     # Other models: us.amazon.nova-pro-v1:0, us.amazon.nova-lite-v1:0,
@@ -180,3 +180,42 @@ api_backends:
 #   - "kubectl delete"
 #   - "rm -rf"
 #   - "git push --force"
+
+# === Hooks (v0.17+) ===
+# User-defined shell scripts triggered at specific lifecycle points.
+# Each hook receives a JSON payload via STDIN with context (trigger, input, agent, etc.)
+# Exit codes: 0=success, 2=block execution (pre_route/pre_execute with block_on_failure), other=warning.
+#
+# Available triggers:
+#   pre_route:        Before routing decision (can block with exit 2)
+#   pre_execute:      Before DAG step execution (can block with exit 2)
+#   post_execute:     After DAG step completes (observe only)
+#   on_session_start: When REPL session begins (stdout injected as context)
+#   on_session_end:   When REPL session exits (cleanup)
+#
+# hooks:
+#   on_session_start:
+#     - name: "load-briefing"
+#       command: "cat ~/.config/orch/briefing.md"
+#       timeout: 5
+#
+#   pre_route:
+#     - name: "audit-input"
+#       command: "~/.config/orch/hooks/audit.sh"
+#       timeout: 5
+#
+#   pre_execute:
+#     - name: "approval-gate"
+#       command: "~/.config/orch/hooks/approval.sh"
+#       block_on_failure: true
+#       timeout: 30
+#
+#   post_execute:
+#     - name: "notify-done"
+#       command: "say 'done'"
+#       timeout: 5
+#
+#   on_session_end:
+#     - name: "persist-session"
+#       command: "~/.config/orch/hooks/persist.sh"
+#       timeout: 10

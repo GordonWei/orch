@@ -20,6 +20,7 @@ import (
 	"github.com/gordonwei/orch/pkg/apibackend"
 	"github.com/gordonwei/orch/pkg/backend"
 	"github.com/gordonwei/orch/pkg/config"
+	"github.com/gordonwei/orch/pkg/hooks"
 	"github.com/gordonwei/orch/pkg/memory"
 	"github.com/gordonwei/orch/pkg/planner"
 )
@@ -103,6 +104,9 @@ type Executor struct {
 
 	// MemoryStore, if set, is used to record API usage (token counts + cost).
 	MemoryStore *memory.Store
+
+	// HookRunner, if set, runs user-defined hooks at pre/post execute points.
+	HookRunner *hooks.Runner
 }
 
 // New creates a new Executor instance.
@@ -367,7 +371,7 @@ func (e *Executor) Execute(plan *planner.Plan) Result {
 			e.emit(StepEvent{Type: EventStepStart, StepID: n.step.ID})
 
 			// Execute step (with retry logic)
-			sr := e.executeStep(n.step, priorContext)
+			sr := e.executeStep(ctx, n.step, priorContext)
 
 			// Store result
 			mu.Lock()
@@ -466,10 +470,55 @@ func (e *Executor) Execute(plan *planner.Plan) Result {
 // ===== Single Step Execution (with retry and verification) =====
 
 // executeStep executes a single step, includes retry logic.
-func (e *Executor) executeStep(step planner.Step, priorContext string) StepResult {
+func (e *Executor) executeStep(ctx context.Context, step planner.Step, priorContext string) StepResult {
 	start := time.Now()
 	var output string
 	var err error
+
+	// --- Pre-execute hooks ---
+	// Hooks and the built-in high-risk approval gate are additive, not mutually
+	// exclusive: a pre_execute hook configured for an unrelated purpose (logging,
+	// notifications, etc.) must not silently disable the interactive confirmation
+	// for destructive commands (terraform destroy, rm -rf, ...). A hook can still
+	// block on its own via exit 2 + block_on_failure, which short-circuits before
+	// the legacy check ever runs.
+	if e.HookRunner != nil && e.HookRunner.HasHooks(hooks.PreExecute) {
+		cwd, _ := os.Getwd()
+		hookResults, hookErr := e.HookRunner.Run(ctx, hooks.HookEvent{
+			Trigger: hooks.PreExecute,
+			Input:   step.Prompt,
+			Agent:   step.Agent,
+			StepID:  step.ID,
+			Command: step.Command,
+			Cwd:     cwd,
+			Meta:    map[string]string{"description": step.Description},
+		})
+		if hookErr != nil {
+			fmt.Fprintf(os.Stderr, "   ⚠️  pre_execute hook error: %v\n", hookErr)
+		}
+		if hooks.Blocked(hookResults) {
+			reason := hooks.BlockReason(hookResults)
+			fmt.Fprintf(os.Stderr, "   🚫 blocked by hook: %s\n", reason)
+			return StepResult{
+				StepID:      step.ID,
+				Description: step.Description,
+				Agent:       step.Agent,
+				Err:         fmt.Errorf("blocked by pre_execute hook: %s", reason),
+				Took:        time.Since(start),
+			}
+		}
+	}
+	if e.ApprovalFunc != nil && step.Command != "" && e.isHighRiskCommand(step.Command) {
+		if !e.ApprovalFunc(step.Command) {
+			return StepResult{
+				StepID:      step.ID,
+				Description: step.Description,
+				Agent:       step.Agent,
+				Err:         fmt.Errorf("user denied execution of high-risk command"),
+				Took:        time.Since(start),
+			}
+		}
+	}
 
 	for attempt := 0; attempt <= e.maxRetries; attempt++ {
 		if attempt > 0 {
@@ -490,7 +539,7 @@ func (e *Executor) executeStep(step planner.Step, priorContext string) StepResul
 		}
 
 		// Success
-		return StepResult{
+		sr := StepResult{
 			StepID:      step.ID,
 			Description: step.Description,
 			Agent:       step.Agent,
@@ -500,6 +549,35 @@ func (e *Executor) executeStep(step planner.Step, priorContext string) StepResul
 			Files:       parseFiles(output),
 			KV:          parseKV(output),
 		}
+
+		// --- Post-execute hooks ---
+		if e.HookRunner != nil && e.HookRunner.HasHooks(hooks.PostExecute) {
+			cwd, _ := os.Getwd()
+			hookResults, hookErr := e.HookRunner.Run(ctx, hooks.HookEvent{
+				Trigger: hooks.PostExecute,
+				Input:   step.Prompt,
+				Agent:   step.Agent,
+				StepID:  step.ID,
+				Command: step.Command,
+				Output:  output,
+				Cwd:     cwd,
+				Meta:    map[string]string{"description": step.Description},
+			})
+			if hookErr != nil {
+				fmt.Fprintf(os.Stderr, "   ⚠️  post_execute hook error: %v\n", hookErr)
+			}
+			// Post-execute hooks cannot block (step already ran), just log warnings
+			for _, hr := range hookResults {
+				if hr.ExitCode != 0 && hr.Err == nil {
+					fmt.Fprintf(os.Stderr, "   ⚠️  hook %q exited %d: %s\n", hr.Name, hr.ExitCode, hr.Stderr)
+				}
+				if hr.Err != nil {
+					fmt.Fprintf(os.Stderr, "   ⚠️  hook %q: %v\n", hr.Name, hr.Err)
+				}
+			}
+		}
+
+		return sr
 	}
 
 	return StepResult{
@@ -624,23 +702,13 @@ func (e *Executor) runStep(step planner.Step, priorContext string) (string, erro
 		if step.Command == "" {
 			return "", fmt.Errorf("shell step has no command")
 		}
-		// Approval gate: check if command is high-risk
-		if e.ApprovalFunc != nil && e.isHighRiskCommand(step.Command) {
-			if !e.ApprovalFunc(step.Command) {
-				return "", fmt.Errorf("user denied execution of high-risk command")
-			}
-		}
+		// Approval gate is now handled by pre_execute hooks (see executeStep)
 		cmd = exec.CommandContext(ctx, "bash", "-c", step.Command)
 
 	default:
 		// Run directly as shell command (terraform, kubectl, helm, aws, gcloud)
 		if step.Command != "" {
-			// Approval gate: check if command is high-risk
-			if e.ApprovalFunc != nil && e.isHighRiskCommand(step.Command) {
-				if !e.ApprovalFunc(step.Command) {
-					return "", fmt.Errorf("user denied execution of high-risk command")
-				}
-			}
+			// Approval gate is now handled by pre_execute hooks (see executeStep)
 			cmd = exec.CommandContext(ctx, "bash", "-c", step.Command)
 		} else if step.Prompt != "" {
 			// No command but has prompt — delegate to primary backend
