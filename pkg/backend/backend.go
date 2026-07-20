@@ -9,8 +9,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
+
+	"github.com/gordonwei/orch/pkg/session"
 )
 
 // Backend defines the interface for an AI CLI backend.
@@ -196,7 +199,8 @@ func (k *KiroBackend) Available() bool {
 
 func (k *KiroBackend) Execute(prompt string, workDir string) (string, error) {
 	cmd := exec.Command("kiro-cli", "chat", "--trust-all-tools", prompt)
-	return runCmd(cmd, workDir)
+	out, err := runCmd(cmd, workDir)
+	return cleanKiroChatOutput(out), err
 }
 
 func (k *KiroBackend) CLIArgs(prompt string) []string {
@@ -238,12 +242,12 @@ func (g *GeminiBackend) Available() bool {
 }
 
 func (g *GeminiBackend) Execute(prompt string, workDir string) (string, error) {
-	cmd := exec.Command("gemini", "--skip-trust", "-p", prompt)
+	cmd := exec.Command("gemini", "--yolo", "-p", prompt)
 	return runCmd(cmd, workDir)
 }
 
 func (g *GeminiBackend) CLIArgs(prompt string) []string {
-	return []string{"gemini", "--skip-trust", "-p", prompt}
+	return []string{"gemini", "--yolo", "-p", prompt}
 }
 
 // ===== Helpers =====
@@ -275,16 +279,38 @@ func runCmd(cmd *exec.Cmd, workDir string) (string, error) {
 
 	select {
 	case err := <-done:
+		out := stripANSI(stdout.String())
 		if err != nil {
-			return stdout.String(), fmt.Errorf("%s failed: %w\nstderr: %s",
+			return out, fmt.Errorf("%s failed: %w\nstderr: %s",
 				cmd.Path, err, stderr.String())
 		}
-		return stdout.String(), nil
+		return out, nil
 	case <-timer.C:
 		// Timeout: kill the process
 		if cmd.Process != nil {
 			cmd.Process.Kill()
 		}
-		return stdout.String(), fmt.Errorf("%s timed out after %s", cmd.Path, defaultTimeout)
+		return stripANSI(stdout.String()), fmt.Errorf("%s timed out after %s", cmd.Path, defaultTimeout)
 	}
+}
+
+// stripANSI removes ANSI escape sequences and control characters from CLI
+// output captured via exec.Command. Backend CLIs (kiro-cli, claude, gemini)
+// are built for a live TTY and print colored prompts/chrome even when their
+// stdout is redirected to a pipe; without this, those bytes end up printed
+// verbatim as part of the "answer" orch hands back to the user.
+func stripANSI(s string) string {
+	return (&session.StripState{}).Strip(s)
+}
+
+// kiroPromptChromeRe matches kiro-cli's leading colored "> " prompt marker,
+// which is plain text ("> ") once stripANSI removes the color codes around
+// it. It's chrome meant for a live TTY chat UI, not part of the answer.
+var kiroPromptChromeRe = regexp.MustCompile(`^\s*>\s*`)
+
+// cleanKiroChatOutput strips kiro-cli TTY chrome that stripANSI alone can't
+// remove: the leading "> " prompt marker described above.
+func cleanKiroChatOutput(s string) string {
+	s = kiroPromptChromeRe.ReplaceAllString(s, "")
+	return strings.TrimSpace(s)
 }

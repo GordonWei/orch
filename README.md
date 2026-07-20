@@ -529,6 +529,25 @@ npm install -g @anthropic-ai/gemini  # or: brew install gemini
 
 ## Changelog
 
+### v0.17.1 (2026-07-21)
+
+**A real user-perspective pass through daily-use functions (chat, dry-run planning, gemini backend, "read the handoff" — not just reading code) turned up three problems that survive after the routing/classification work in v0.16.x–v0.17.0: routing being *correct* doesn't mean the output is *usable*.**
+
+- **🔴 Fixed: kiro-cli's TTY chrome (ANSI color codes, colored `> ` prompt marker) was being captured verbatim into orch's answers.** `pkg/backend/backend.go`'s `runCmd()` piped `cmd.Stdout` straight through with no cleanup — fine for a live terminal, but kiro-cli's own coloring is meant to be rendered by a real TTY, not printed as literal escape bytes. Now `runCmd()` strips ANSI via the existing UTF-8-safe `session.StripState` (the same logic the PTY session path has used since v0.10.1), and `KiroBackend.Execute()` additionally trims the leading `"> "` prompt marker that survives once the color codes around it are gone. This affects every task routed through kiro, claude, or gemini, not just chat.
+- **🔴 Fixed: the `gemini` backend was completely broken.** `--backend gemini`, and `/session gemini`, both hardcoded `gemini --skip-trust ...` — a flag Google's gemini CLI has since removed (current `gemini --help` only has `-y`/`--yolo` and `--approval-mode`). Every gemini-routed task or session spawn failed outright with the CLI's own `Unknown arguments: skip-trust, skipTrust` error instead of doing anything. Swapped to `--yolo` in both `pkg/backend/backend.go` and `pkg/session/session.go`. (The v0.13.0 changelog entry describing the old flag is left as-is — it was accurate when written; this entry is the correction, not a rewrite of history.)
+- **🟡 Fixed: "讀交接" (and similar "read this doc/log/status" requests) correctly avoid the old chat-misclassification bug from v0.16.1–v0.16.3, but the *next* problem was never addressed — they'd get planned as a bare `shell: cat <file>` step and dump the entire raw file to the terminal instead of answering what the user actually wanted to know.** `buildSystemPrompt()` (the Layer 3 cloud planning prompt) now has an explicit rule: requests to read/check a document for its content or current state should delegate to `kiro`/`claude` with a "read this file and summarize" prompt, not a raw shell cat — reserving the literal shell path for when the user explicitly asks for the raw/full text. This is a planning-prompt heuristic, not a deterministic rule; worth a second look if a future case shows the model leaning the wrong way.
+- All three verified with real (not `--dry-run`-only) invocations after rebuilding, including confirming the ANSI/prompt-chrome fix against raw bytes via `hexdump -C` — an earlier pass misdiagnosed a *fourth*, non-existent bug (stray `**` markdown in kiro's output) that turned out to be an artifact of this machine's `od -c` rendering CJK characters, not real data; caught and dropped before shipping.
+
+### v0.17.0 (2026-07-20)
+
+**Hook system + unified approval gate + main.go split.**
+
+- **`pkg/hooks/`** — 5 trigger points (`pre_route`, `pre_execute`, `post_execute`, `on_session_start`, `on_session_end`), hook payload delivered as JSON via STDIN, `exit 2` blocks the action, with timeout and context-cancellation support. Wired into the executor (`pre_execute`/`post_execute`) and the REPL (`pre_route`/`on_session_start`/`on_session_end`).
+- **🔴 Fixed during review: the approval gate for high-risk commands (`terraform destroy`, `rm -rf`, etc.) could be silently disabled.** The original implementation treated "a `pre_execute` hook is configured" and "prompt for interactive approval on high-risk commands" as mutually exclusive (if/else) — so setting *any* `pre_execute` hook, even one unrelated to safety (e.g. a plain logging hook), silently turned off the built-in high-risk confirmation with no warning. Fixed so both run independently (a hook can still block via `exit 2`, but its mere presence no longer removes the built-in check); locked in with `TestApprovalGateSurvivesUnrelatedHook`.
+- **`main.go` split 1142 → 462 lines** into `commands.go` and `task.go` for readability; `config.ExpandHome` exported to remove a duplicate implementation.
+- `config.yaml` template gained a bedrock-enabled example, route rule examples, and hook examples.
+- Known gap, not fixed this round: `on_session_end` only fires on a clean REPL exit (`exit`/`quit`/EOF) — Ctrl+C/SIGTERM go through the signal handler's `os.Exit(130)` and never reach it, so a documented "persist session on exit" hook example won't actually run on the most common way people leave the REPL. Needs the existing `RegisterShutdown`/signal-handler path touched to fix; left for a future pass.
+
 ### v0.16.4 (2026-07-19)
 
 **Found the actual reason local chat sometimes felt like it just died: every MLX HTTP call had zero timeout. A batch of smaller usability bugs came out of chasing that one down.**

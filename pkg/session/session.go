@@ -67,7 +67,7 @@ func Spawn(cfg Config) (*Session, error) {
 	case BackendKiro:
 		cmd = exec.Command("kiro-cli", "chat", "--trust-all-tools")
 	case BackendGemini:
-		cmd = exec.Command("gemini", "--skip-trust", "--yolo")
+		cmd = exec.Command("gemini", "--yolo")
 	default:
 		return nil, fmt.Errorf("unsupported backend: %s", cfg.Backend)
 	}

@@ -760,6 +760,13 @@ Your job:
 5. Prefer kiro for: code, infra, AWS, GCP, terraform, file operations, build/test
 6. Prefer claude for: Notion sync, Google Workspace, meeting notes, writing
 7. Prefer gemini for: very long documents (>50k tokens), video/image analysis
+8. If the user asks to "read"/"check"/"讀"/"看一下" a document, log, or handoff/status
+   file for its content or current state — as opposed to explicitly asking to see
+   the raw/full text — do NOT use a bare "shell: cat <file>" step. The user wants
+   the key points, not the raw file. Use agent "kiro" or "claude" with a prompt
+   telling it to read the file at that path and summarize the relevant parts
+   (both have file access). Only use a plain shell cat/less step when the user
+   explicitly asks for the raw/full/complete text.
 
 Respond ONLY with valid JSON matching this schema:
 {
