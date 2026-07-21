@@ -2,18 +2,42 @@
 # 觸發：orch "status" / "狀態"（任一同義詞皆可觸發）
 # 注意：ASCII trigger（"status"）會做 word-boundary 檢查（不會誤觸發於 "statusbar"/"gitstatus"）
 # CJK trigger（"狀態"）用 substring 匹配（"看一下狀態" 也會觸發）
+#
+# v0.17.2：原本用 shell grep/head 從各子專案交接檔擷取「更新時間/狀態/摘要」關鍵字，
+# 但各子專案交接檔開頭格式不一致（表格欄位名稱不同、有些檔案前 20 行是天條/規則而非狀態表、
+# 有些子專案把整段摘要塞進表格的單一儲存格、長達數千字的一整行，head -N 對「限制長度」完全無效），
+# 實測對半數子專案完全撈不到內容、對長行子專案又整行吐出來。改用 agent 實際讀取並摘要
+# （跟 pkg/planner buildSystemPrompt「讀文件要摘要、不要純 cat」是同一種修法，這次是在 workflow
+# 定義層級套用同一個原則）。
 name: "status"
 trigger: ["status", "狀態"]
 description: "快速顯示各子專案現況和待辦"
 steps:
   - id: check
-    agent: shell
-    command: |
-      echo "📊 Cowork 子專案狀態" && echo "" && \
-      for dir in AWS GCP OnPremise momo Salesforce Study; do \
-        if [ -f "$dir/docs/_agent_handoff.md" ]; then \
-          echo "━━━ $dir ━━━" && \
-          head -20 "$dir/docs/_agent_handoff.md" | grep -E "更新時間|狀態|摘要" | head -3 && \
-          echo ""; \
-        fi; \
-      done
+    agent: kiro
+    prompt: |
+      對以下每一個路徑，先用 `test -f <path> && echo EXISTS || echo MISSING` 確認檔案是否存在，
+      再用 `head -20 <path>` 直接讀取檔案開頭（不要用 grep 篩選日期範圍、不要假設最新內容一定
+      落在某個特定月份，該檔案最上面那則「最後更新」/「現況快照」不管日期是哪一天都要照實摘要）：
+      - ~/Desktop/Cowork/AWS/docs/_agent_handoff.md
+      - ~/Desktop/Cowork/GCP/docs/_agent_handoff.md
+      - ~/Desktop/Cowork/OnPremise/docs/_agent_handoff.md
+      - ~/Desktop/Cowork/momo/docs/_agent_handoff.md
+      - ~/Desktop/Cowork/Salesforce/docs/_agent_handoff.md
+      - ~/Desktop/Cowork/Study/docs/_agent_handoff.md
+
+      針對每個 EXISTS 的檔案，用「一行」摘要開頭那則最新狀態（日期 + 一句話重點），輸出格式：
+
+      📊 Cowork 子專案狀態
+      ━━━ AWS ━━━
+      [日期] [一句話摘要]
+      ━━━ GCP ━━━
+      [日期] [一句話摘要]
+      ━━━ OnPremise ━━━
+      ...（依此類推，六個子專案都要列出）
+
+      規則：
+      - 每個子專案只輸出一行摘要，不要輸出檔案原文、不要輸出整段變更紀錄
+      - 只有 `test -f` 明確回報 MISSING 時，該行才寫「(無交接檔)」——絕對不能因為內容日期較舊、
+        或篩選/搜尋沒命中，就誤判成沒有交接檔
+      - 不要加上你自己的額外評論或建議，純粹列出六行摘要即可

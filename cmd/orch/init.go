@@ -64,11 +64,11 @@ func handleInit() {
 
 	// Step 5: MLX local model (required on Apple Silicon)
 	fmt.Println("🍎 MLX local inference (required — Apple Silicon primary engine)")
-	fmt.Print("   Model [mlx-community/Qwen2.5-1.5B-Instruct-4bit]: ")
+	fmt.Print("   Model [mlx-community/Qwen2.5-7B-Instruct-4bit]: ")
 	mlxModel, _ := reader.ReadString('\n')
 	mlxModel = strings.TrimSpace(mlxModel)
 	if mlxModel == "" {
-		mlxModel = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+		mlxModel = "mlx-community/Qwen2.5-7B-Instruct-4bit"
 	}
 	enableMLX := true
 
@@ -154,10 +154,10 @@ func generateConfig(primary, lang, owner string, enableMLX bool, workspace strin
 	mlxSection := `# MLX local inference disabled
 # Uncomment to enable:
 # models:
-#   - name: "qwen-1.5b"
+#   - name: "qwen-7b"
 #     backend: "mlx"
 #     endpoint: "http://localhost:8080"
-#     model: "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+#     model: "mlx-community/Qwen2.5-7B-Instruct-4bit"
 #     python_path: "~/mlx-env/bin/python3"
 #     auto_start: true
 #     port: "8080"

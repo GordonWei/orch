@@ -368,7 +368,7 @@ models:
   - name: "mlx-default"
     backend: "mlx"
     endpoint: "http://localhost:8080"
-    model: "mlx-community/Qwen2.5-3B-Instruct-4bit"
+    model: "mlx-community/Qwen2.5-7B-Instruct-4bit"
     python_path: "~/mlx-env/bin/python3"
     auto_start: true
     port: "8080"
@@ -378,6 +378,8 @@ models:
 To use a smaller model (less RAM, faster but less accurate):
 
 ```yaml
+  - name: "qwen-3b"
+    model: "mlx-community/Qwen2.5-3B-Instruct-4bit"
   - name: "qwen-1.5b"
     model: "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
 ```
@@ -528,6 +530,17 @@ npm install -g @anthropic-ai/gemini  # or: brew install gemini
 ```
 
 ## Changelog
+
+### v0.17.2 (2026-07-21)
+
+**A third pass, this time specifically closing every gap the v0.17.1 UX test left open ("didn't test", "found but didn't fix") ahead of a conference talk that uses this project as the demo.**
+
+- **🔴 Fixed: `/w`'s nested workflow-number prompt silently discarded whatever the user typed next if it wasn't a valid number.** Typing anything other than a number at `Enter number to execute, or press Enter to cancel:` (e.g. starting to type your next command without noticing the nested prompt) printed `❌ invalid workflow number: ...` and the input was gone — not just an extra error line, the command itself never ran and had to be retyped. `handleWorkflowMenu` now treats non-numeric input as "cancel," but hands the line back to the REPL's main loop via a new `pendingInput` mechanism instead of dropping it, so it gets reprocessed as a normal command (slash command or plain input) on the next iteration. Verified via PTY-driven tests for both a plain command (`exit`) and a slash command (`/history`) typed at the nested prompt.
+- **🔴 Fixed: the `status`/`狀態` workflow's hardcoded `grep`/`head` extraction failed for roughly half the target files, and dumped raw multi-thousand-character lines for the rest.** Each sub-project's handoff doc uses different table column names and conventions (some fold an entire day's summary into one markdown-table cell with no real line breaks), so a fixed `head -20 | grep -E "..." | head -3` pattern couldn't work reliably across all of them. Replaced the shell step with an `agent: kiro` step that reads and summarizes each file directly — same fix pattern as v0.17.1's "summarize, don't cat" rule, applied at the workflow-template level this time. Caught a real false-negative while writing the prompt: the first draft let the agent invent its own "search for recent dates" strategy, which caused it to wrongly report a file as missing just because its latest entry predated whatever date pattern it happened to grep for. Fixed by requiring an explicit `test -f` existence check and telling it not to assume recency by date. Verified twice (LLM output isn't fully deterministic) — all six sub-projects reported correctly both times.
+- **🟡 Hardened: `runCmd()` (used by every kiro/claude/gemini one-shot `Execute()` call) now runs the CLI in its own process group and kills the whole group once the call finishes**, cleaning up any helper processes the CLI spawns that don't exit alongside its own exit code (observed with kiro-cli's `tui.js`/`acp` helpers accumulating across repeated calls). Confined to `pkg/backend`; doesn't touch the separate `exec.CommandContext` paths used by the executor or hooks.
+- **🟡 Fixed: `orch init`'s MLX model prompt still defaulted to `Qwen2.5-1.5B-Instruct-4bit`**, superseded back in v0.16.4 when the team moved to 7B as the actual default (also already reflected in the shipped `config.yaml` template). A fresh-machine `orch init` was quietly steering new setups toward an abandoned smaller model. Updated the prompt default and the MLX-disabled comment block in `cmd/orch/init.go`, plus the matching example in this README.
+- **Newly verified, previously untested**: `/session gemini`'s interactive PTY spawn (confirms the v0.17.1 `--yolo` fix works in the session path too, not just batch `Execute()`); the `claude` backend's cloud-planning path (via `--backend claude --dry-run`, sidestepping the recursion risk of invoking `claude` directly); `/pass` cross-session context handoff; and the Event Bus reactive-workflow chaining (`pkg/eventbus`) — confirmed to genuinely fire end-to-end via an isolated scratch config, since the shipped `workflows/` directory has zero `mode: reactive` examples to test against otherwise.
+- **Known gap, not fixed**: `orch init` creates an empty `~/.config/orch/workflows/` directory and never seeds it from the repo's own `workflows/*.yaml` — the root cause behind deployed workflow files silently drifting from the repo on any given machine. Left as a product decision (auto-copy on init vs. requiring an explicit step) rather than something to decide unilaterally.
 
 ### v0.17.1 (2026-07-21)
 

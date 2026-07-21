@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gordonwei/orch/pkg/session"
@@ -260,6 +261,12 @@ func runCmd(cmd *exec.Cmd, workDir string) (string, error) {
 		cmd.Dir = workDir
 	}
 
+	// Run in its own process group so we can clean up any child processes
+	// the CLI spawns (kiro-cli in particular leaves orphaned tui.js/acp
+	// helper processes behind even after its own exit code comes back to
+	// us — see killProcessGroup below).
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -267,6 +274,7 @@ func runCmd(cmd *exec.Cmd, workDir string) (string, error) {
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("%s failed to start: %w", cmd.Path, err)
 	}
+	defer killProcessGroup(cmd)
 
 	// Wait with timeout
 	done := make(chan error, 1)
@@ -292,6 +300,20 @@ func runCmd(cmd *exec.Cmd, workDir string) (string, error) {
 		}
 		return stripANSI(stdout.String()), fmt.Errorf("%s timed out after %s", cmd.Path, defaultTimeout)
 	}
+}
+
+// killProcessGroup best-effort kills every process in cmd's process group
+// once cmd itself has exited (or timed out). CLIs like kiro-cli spawn helper
+// processes (tui.js/acp) that don't always exit alongside the parent's own
+// exit code — left alone, these accumulate as orphans across repeated orch
+// invocations (observed during 2026-07-21 UX testing: ~10 stray processes
+// after one test session). Since we set Setpgid above, the group ID equals
+// the parent PID, so this only ever touches processes this call spawned.
+func killProcessGroup(cmd *exec.Cmd) {
+	if cmd.Process == nil {
+		return
+	}
+	syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 }
 
 // stripANSI removes ANSI escape sequences and control characters from CLI

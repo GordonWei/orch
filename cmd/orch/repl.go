@@ -108,6 +108,8 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br
 		}
 	}
 
+	var pendingInput string
+
 	for {
 		// Update prompt based on session mode
 		if sm.HasActive() {
@@ -116,18 +118,27 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br
 			rl.SetPrompt("› ")
 		}
 
-		line, err := rl.Readline()
-		if err == readline.ErrInterrupt {
-			// Ctrl+C in session mode → back to normal
-			if sm.HasActive() {
-				sm.Back()
-				fmt.Fprintf(os.Stderr, "⏎ back to normal mode\n")
+		var line string
+		if pendingInput != "" {
+			// Reprocess input that a nested prompt (e.g. /w's number picker)
+			// bounced back instead of consuming — see handleWorkflowMenu.
+			line = pendingInput
+			pendingInput = ""
+		} else {
+			var err error
+			line, err = rl.Readline()
+			if err == readline.ErrInterrupt {
+				// Ctrl+C in session mode → back to normal
+				if sm.HasActive() {
+					sm.Back()
+					fmt.Fprintf(os.Stderr, "⏎ back to normal mode\n")
+					continue
+				}
 				continue
 			}
-			continue
-		}
-		if err != nil {
-			break
+			if err != nil {
+				break
+			}
 		}
 		input := strings.TrimSpace(line)
 		if input == "" {
@@ -143,7 +154,7 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br
 
 		// Slash commands are handled in both modes
 		if strings.HasPrefix(input, "/") {
-			handleSlashCommand(rl, reg, cfg, store, br, apiBackends, bus, sm, rt, input)
+			pendingInput = handleSlashCommand(rl, reg, cfg, store, br, apiBackends, bus, sm, rt, input)
 			continue
 		}
 
@@ -339,7 +350,12 @@ func (s *sessionContext) buildContext() string {
 
 // ===== REPL Slash Commands =====
 
-func handleSlashCommand(rl *readline.Instance, reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry, apiBackends map[string]apibackend.APIBackend, bus *eventbus.Bus, sm *SessionManager, rt *router.Router, input string) {
+// handleSlashCommand dispatches a "/..." command. It returns a non-empty
+// string when a nested prompt (e.g. /w's workflow number picker) captured a
+// line that wasn't a valid answer to that prompt but looks like the user
+// meant to type a new top-level command — the caller should reprocess it on
+// the next loop iteration instead of silently discarding it.
+func handleSlashCommand(rl *readline.Instance, reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry, apiBackends map[string]apibackend.APIBackend, bus *eventbus.Bus, sm *SessionManager, rt *router.Router, input string) string {
 	parts := strings.Fields(input)
 	cmd := strings.ToLower(parts[0])
 	args := parts[1:]
@@ -376,7 +392,7 @@ func handleSlashCommand(rl *readline.Instance, reg *registry.Registry, cfg *conf
 		if len(args) > 0 {
 			handleWorkflowExec(rl, reg, cfg, store, br, apiBackends, args[0])
 		} else {
-			handleWorkflowMenu(rl, reg, cfg, store, br, apiBackends)
+			return handleWorkflowMenu(rl, reg, cfg, store, br, apiBackends)
 		}
 
 	case "/h", "/history":
@@ -388,6 +404,7 @@ func handleSlashCommand(rl *readline.Instance, reg *registry.Registry, cfg *conf
 	default:
 		fmt.Fprintf(os.Stderr, "❓ unknown command: %s (type /help for available commands)\n", cmd)
 	}
+	return ""
 }
 
 // --- Session commands ---
@@ -795,15 +812,20 @@ func printREPLHelp(sm *SessionManager) {
 
 // ===== Workflow / History / Briefing (unchanged) =====
 
-func handleWorkflowMenu(rl *readline.Instance, reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry, apiBackends map[string]apibackend.APIBackend) {
+// handleWorkflowMenu prompts for a workflow number. If what comes back isn't
+// a valid number, we can't tell whether the user meant to cancel or just
+// started typing their next command without noticing the nested prompt — so
+// we treat it as "cancel", but hand the line back to the caller instead of
+// discarding it, so it gets reprocessed as a normal top-level command.
+func handleWorkflowMenu(rl *readline.Instance, reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry, apiBackends map[string]apibackend.APIBackend) string {
 	workflows, err := workflow.LoadAll(cfg.Workflows.Dir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ failed to load workflows: %v\n", err)
-		return
+		return ""
 	}
 	if len(workflows) == 0 {
 		fmt.Fprintf(os.Stderr, "📋 no workflows available (dir: %s)\n", cfg.Workflows.Dir)
-		return
+		return ""
 	}
 
 	fmt.Fprintf(os.Stderr, "📋 Available workflows:\n")
@@ -818,16 +840,22 @@ func handleWorkflowMenu(rl *readline.Instance, reg *registry.Registry, cfg *conf
 	rl.SetPrompt(oldPrompt)
 
 	if err != nil {
-		return
+		return ""
 	}
 
 	choice = strings.TrimSpace(choice)
 	if choice == "" {
 		fmt.Fprintf(os.Stderr, "(cancelled)\n")
-		return
+		return ""
+	}
+
+	if _, convErr := strconv.Atoi(choice); convErr != nil {
+		fmt.Fprintf(os.Stderr, "(cancelled — \"%s\" doesn't look like a workflow number, treating it as your next command)\n", choice)
+		return choice
 	}
 
 	handleWorkflowExec(rl, reg, cfg, store, br, apiBackends, choice)
+	return ""
 }
 
 func handleWorkflowExec(rl *readline.Instance, reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry, apiBackends map[string]apibackend.APIBackend, numStr string) {
