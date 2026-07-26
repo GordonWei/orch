@@ -531,6 +531,17 @@ npm install -g @anthropic-ai/gemini  # or: brew install gemini
 
 ## Changelog
 
+### v0.18.0 (2026-07-26)
+
+**Four new capabilities from Kiro, reviewed and one wording fix applied before shipping.**
+
+- **`on_session_end` hooks now fire on Ctrl+C/SIGTERM, not just a clean `exit`/`quit`/EOF.** This was a known gap called out in the v0.17.0 changelog: the signal handler's `os.Exit(130)` path never ran REPL cleanup hooks, so anyone relying on `on_session_end` for session-log persistence lost it on the most common way people actually leave the REPL. The handler now runs any configured `on_session_end` hooks (5s timeout) before exiting when a signal arrives mid-REPL, tracked via a new `inREPL` flag. Locked in with two new regression tests: one confirming the hook fires correctly under a timeout-bounded context (the same shape the signal handler uses), one confirming a hanging hook still gets killed by its own configured timeout rather than blocking process exit.
+- **`orch init` now seeds `~/.config/orch/workflows/` from the repo's bundled templates.** Also a known gap from v0.17.2: a fresh `orch init` created an empty workflows directory, so every machine's deployed workflows silently drifted from whatever the repo actually shipped. The 5 `workflows/*.yaml` files are now embedded into the binary via `go:embed` and copied into place on init — skipping any file that already exists, so it won't clobber customizations. Verified against a scratch `$HOME`: all 5 templates land correctly on first `init`.
+- **`orch cost` is now a real dashboard, not just a table.** Added a routing-distribution section (local vs. cloud call share, as a quick "how much am I actually offloading" signal) and a daily cost trend for the `week`/`month` views, both rendered as ASCII bar charts. Verified by seeding a scratch database with synthetic history/usage rows and inspecting the rendered output directly.
+- **New `orch replay <N>` / `orch replay list` command — recalls, not re-executes.** Reviewed before shipping and caught a real gap between what it says and what it does: the original messaging (`re-executing...`) implied automatic execution, but the subcommand context has no `runTask()`/registry/backend wiring to actually do that, so it only ever printed the original input back for you to copy-paste or pipe. Fixed the wording (`Recalling task:`, help text now says "to recall it") to describe what actually happens instead of overclaiming; the underlying scope (recall-only, no live re-execution) is unchanged. `docs/_draft_roadmap.md`'s original entry for this feature described full re-execution — updated to reflect what actually shipped and why (no execution context available from a bare subcommand without a larger refactor).
+- **New `/context` (`/ctx`) REPL command** — attach local files (`add`/`rm`/`clear`/`refresh`/`list`) so their content gets injected into every subsequent prompt alongside the existing conversation-turn context, capped at 256KB per file.
+- `go build` / `go vet` / `go test -race ./...` all green across every package, including the two new hook regression tests.
+
 ### v0.17.2 (2026-07-21)
 
 **A third pass, this time specifically closing every gap the v0.17.1 UX test left open ("didn't test", "found but didn't fix") ahead of a conference talk that uses this project as the demo.**

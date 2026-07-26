@@ -57,7 +57,7 @@
 |---|------|------|---------|--------|
 | 1 | **techIndicators config-driven** | 將 `router.go` Classify() step 2 的 70+ 技術關鍵字搬到 `config.yaml` | 目前是唯一還 hardcode 的路由邏輯，用戶無法自訂「什麼算技術任務」 | S |
 | 2 | **Session output 持久化** | session mode 的對話歷史自動寫入 SQLite（或 `~/.config/orch/sessions/`） | 目前 session 結束就沒了，無法回顧「剛才跟 claude 聊了什麼」 | M |
-| 3 | **`orch replay <id>`** | 從 history 重新執行某次任務（含原始 plan + re-execute） | `orch history` 能看但不能重跑，失敗任務需要手動重打 | S |
+| 3 | ~~**`orch replay <id>`**~~ ✅ 部分完成 | 目前只做到「從 history 印出原始輸入供複製貼上」，非原規劃的「自動重新執行」——subcommand context 沒有 registry/backend 可呼叫 `runTask()`，若要做到真正 re-execute 需要更大改動，留待後續評估 | `orch history` 能看但不能重跑，失敗任務需要手動重打 | S |
 | 4 | **Session 間 context 傳遞** | `/pass <backend>` 把當前 session 最後一輪 output 注入另一個 session 作為 context | 目前 multi-session 之間是隔離的，手動 copy-paste 很痛苦。這是 orch 相比直接開多 terminal 的核心差異化 | M |
 | 5 | **`--json` output mode** | one-shot 模式輸出結構化 JSON（plan + result + timing） | 方便跟其他腳本/CI 串接，Unix philosophy | S |
 

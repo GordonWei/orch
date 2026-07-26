@@ -1,0 +1,19 @@
+# 開工流程 — 讀取交接表，回報待辦與建議
+# 觸發：orch "開工" / "早安" / "上線" / "上班"（任一同義詞皆可觸發）
+name: "morning"
+trigger: ["開工", "早安", "上線", "上班"]
+description: "讀取三層交接表，回報待辦清單與今日建議"
+steps:
+  - id: read_handoff
+    agent: kiro
+    file_context:
+      - ~/Desktop/Cowork/docs/_agent_handoff.md
+    prompt: |
+      以上是全局交接儀表板的內容。
+      請根據這份交接檔案，回報目前狀態快照：
+
+      輸出格式：
+      📋 今日快照
+      - 待辦：[列出所有 🔴 項目]
+      - 進行中：[列出 WIP 項目]
+      - 建議優先處理：[依急迫度排序前 3 項]

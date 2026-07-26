@@ -23,6 +23,9 @@ import (
 )
 
 func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry, apiBackends map[string]apibackend.APIBackend, bus *eventbus.Bus) {
+	inREPL = true
+	defer func() { inREPL = false }()
+
 	rl, err := readline.NewEx(&readline.Config{
 		Prompt:          "› ",
 		HistoryFile:     os.Getenv("HOME") + "/.orch_history",
@@ -43,6 +46,9 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br
 
 	// Session context: keeps recent conversation turns for backend context injection
 	replSession := &sessionContext{maxTurns: 5}
+
+	// File context: keeps attached files for prompt injection
+	fileCtx := &fileContext{}
 
 	// Session manager for interactive PTY sessions
 	sm := NewSessionManager()
@@ -154,7 +160,7 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br
 
 		// Slash commands are handled in both modes
 		if strings.HasPrefix(input, "/") {
-			pendingInput = handleSlashCommand(rl, reg, cfg, store, br, apiBackends, bus, sm, rt, input)
+			pendingInput = handleSlashCommand(rl, reg, cfg, store, br, apiBackends, bus, sm, rt, fileCtx, input)
 			continue
 		}
 
@@ -282,9 +288,23 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br
 		}
 
 		sessionCtx := replSession.buildContext()
+		fileCtxStr := fileCtx.buildContext()
 		enrichedInput := input
-		if sessionCtx != "" {
-			enrichedInput = fmt.Sprintf("[Prior conversation for context]\n%s\n[End prior conversation]\n\nCurrent request: %s", sessionCtx, input)
+		if fileCtxStr != "" || sessionCtx != "" {
+			var prefix strings.Builder
+			if fileCtxStr != "" {
+				prefix.WriteString("[Attached files for reference]\n")
+				prefix.WriteString(fileCtxStr)
+				prefix.WriteString("\n[End attached files]\n\n")
+			}
+			if sessionCtx != "" {
+				prefix.WriteString("[Prior conversation for context]\n")
+				prefix.WriteString(sessionCtx)
+				prefix.WriteString("\n[End prior conversation]\n\n")
+			}
+			prefix.WriteString("Current request: ")
+			prefix.WriteString(input)
+			enrichedInput = prefix.String()
 		}
 
 		_, output := runTask(nil, reg, cfg, store, br, apiBackends, bus, enrichedInput, false)
@@ -355,7 +375,7 @@ func (s *sessionContext) buildContext() string {
 // line that wasn't a valid answer to that prompt but looks like the user
 // meant to type a new top-level command — the caller should reprocess it on
 // the next loop iteration instead of silently discarding it.
-func handleSlashCommand(rl *readline.Instance, reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry, apiBackends map[string]apibackend.APIBackend, bus *eventbus.Bus, sm *SessionManager, rt *router.Router, input string) string {
+func handleSlashCommand(rl *readline.Instance, reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry, apiBackends map[string]apibackend.APIBackend, bus *eventbus.Bus, sm *SessionManager, rt *router.Router, fc *fileContext, input string) string {
 	parts := strings.Fields(input)
 	cmd := strings.ToLower(parts[0])
 	args := parts[1:]
@@ -400,6 +420,9 @@ func handleSlashCommand(rl *readline.Instance, reg *registry.Registry, cfg *conf
 
 	case "/b", "/briefing":
 		replBriefing(store)
+
+	case "/context", "/ctx":
+		handleContextCmd(fc, args)
 
 	default:
 		fmt.Fprintf(os.Stderr, "❓ unknown command: %s (type /help for available commands)\n", cmd)
@@ -796,6 +819,11 @@ func printREPLHelp(sm *SessionManager) {
   Normal Mode:
     /w, /workflows          — list all available workflows
     /w <number>             — execute workflow by number
+    /context, /ctx          — show attached file context
+    /context add <file>     — attach file(s) as context
+    /context rm <file>      — remove a file from context
+    /context clear          — remove all context files
+    /context refresh        — re-read all files from disk
     /h, /history            — last 10 history entries
     /b, /briefing           — show current briefing
     tools                   — list registered tools

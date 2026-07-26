@@ -591,3 +591,90 @@ func (s *Store) RecentAPIUsage(limit int) ([]APIUsageEntry, error) {
 	}
 	return entries, nil
 }
+
+// RoutingStat holds the count of requests routed to each agent.
+type RoutingStat struct {
+	Agent string
+	Count int
+}
+
+// GetRoutingStats returns total request counts grouped by agent for all history.
+func (s *Store) GetRoutingStats() ([]RoutingStat, error) {
+	rows, err := s.db.Query(`
+		SELECT agent, COUNT(*) as cnt
+		FROM history
+		WHERE agent != ''
+		GROUP BY agent
+		ORDER BY cnt DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var stats []RoutingStat
+	for rows.Next() {
+		var st RoutingStat
+		if err := rows.Scan(&st.Agent, &st.Count); err != nil {
+			return nil, err
+		}
+		stats = append(stats, st)
+	}
+	return stats, nil
+}
+
+// GetRoutingStatsSince returns request counts grouped by agent since a given time.
+func (s *Store) GetRoutingStatsSince(since time.Time) ([]RoutingStat, error) {
+	sinceStr := since.UTC().Format("2006-01-02 15:04:05")
+	rows, err := s.db.Query(`
+		SELECT agent, COUNT(*) as cnt
+		FROM history
+		WHERE agent != '' AND timestamp >= ?
+		GROUP BY agent
+		ORDER BY cnt DESC`, sinceStr)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var stats []RoutingStat
+	for rows.Next() {
+		var st RoutingStat
+		if err := rows.Scan(&st.Agent, &st.Count); err != nil {
+			return nil, err
+		}
+		stats = append(stats, st)
+	}
+	return stats, nil
+}
+
+// DailyCost holds aggregated cost for a single day.
+type DailyCost struct {
+	Date     string
+	CostUSD  float64
+	Calls    int
+}
+
+// GetDailyCosts returns per-day cost aggregation for the last N days.
+func (s *Store) GetDailyCosts(days int) ([]DailyCost, error) {
+	since := time.Now().AddDate(0, 0, -days).UTC().Format("2006-01-02 15:04:05")
+	rows, err := s.db.Query(`
+		SELECT DATE(timestamp) as day, SUM(cost_usd) as cost, COUNT(*) as calls
+		FROM api_usage
+		WHERE timestamp >= ?
+		GROUP BY day
+		ORDER BY day ASC`, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var costs []DailyCost
+	for rows.Next() {
+		var dc DailyCost
+		if err := rows.Scan(&dc.Date, &dc.CostUSD, &dc.Calls); err != nil {
+			return nil, err
+		}
+		costs = append(costs, dc)
+	}
+	return costs, nil
+}

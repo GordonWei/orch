@@ -316,3 +316,72 @@ func TestAllTriggers(t *testing.T) {
 		}
 	}
 }
+
+func TestOnSessionEndWithSignalContext(t *testing.T) {
+	// Regression test: on_session_end hooks should execute correctly even when
+	// invoked with a timeout context (simulating the signal handler path where
+	// Ctrl+C triggers hooks before os.Exit).
+	cfg := HooksConfig{
+		"on_session_end": {
+			{Name: "cleanup", Command: `cat | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('meta',{}).get('reason',''))"`},
+		},
+	}
+	r := NewRunner(cfg)
+
+	// Use a 5-second timeout context like the signal handler does
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	results, err := r.Run(ctx, HookEvent{
+		Trigger: OnSessionEnd,
+		Cwd:     "/tmp",
+		Meta:    map[string]string{"reason": "signal"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d (stderr: %s)", results[0].ExitCode, results[0].Stderr)
+	}
+	if results[0].Stdout != "signal" {
+		t.Fatalf("expected stdout 'signal' (meta.reason), got %q", results[0].Stdout)
+	}
+}
+
+func TestOnSessionEndTimesOutGracefully(t *testing.T) {
+	// If an on_session_end hook hangs, the timeout context should kill it
+	// so the process can still exit. This simulates a misbehaving cleanup script.
+	cfg := HooksConfig{
+		"on_session_end": {
+			{Name: "hangs", Command: "sleep 30", Timeout: 1},
+		},
+	}
+	r := NewRunner(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	results, err := r.Run(ctx, HookEvent{
+		Trigger: OnSessionEnd,
+		Meta:    map[string]string{"reason": "signal"},
+	})
+	took := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	// Hook's own 1s timeout should kick in, not the 5s context timeout
+	if took > 3*time.Second {
+		t.Fatalf("hook timeout took too long: %v (should be ~1s)", took)
+	}
+	if results[0].Err == nil {
+		t.Fatal("expected timeout error for hanging hook")
+	}
+}

@@ -24,6 +24,8 @@ func handleSubcommand(args cliArgs, cfg *config.Config, store *memory.Store) {
 		handleBriefing(args.subArgs, cfg, store)
 	case "cost":
 		handleCostCmd(store, args.subArgs)
+	case "replay":
+		handleReplay(args.subArgs, cfg, store)
 	case "init":
 		handleInit()
 	default:

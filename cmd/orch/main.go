@@ -28,6 +28,10 @@ var verbose bool
 // hookRunner is the global hook runner, initialized from config in main().
 var hookRunner *hooks.Runner
 
+// inREPL is set to true when the REPL loop is active, so the signal handler
+// knows whether on_session_end hooks should fire on Ctrl+C/SIGTERM.
+var inREPL bool
+
 // shutdownFunc is a hook for the signal handler to call Shutdown() on the session manager.
 var (
 	shutdownMu   sync.Mutex
@@ -123,7 +127,31 @@ func main() {
 		case <-done:
 		case <-sigCh:
 			fmt.Fprintf(os.Stderr, "\n⚡ received second signal, forcing exit...\n")
+			os.Exit(130)
 		}
+
+		// Fire on_session_end hooks if we were in REPL mode — this is the
+		// Ctrl+C/SIGTERM path that previously skipped these hooks entirely.
+		if inREPL && hookRunner != nil && hookRunner.HasHooks(hooks.OnSessionEnd) {
+			hookCtx, hookCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			cwd, _ := os.Getwd()
+			hookResults, err := hookRunner.Run(hookCtx, hooks.HookEvent{
+				Trigger: hooks.OnSessionEnd,
+				Cwd:     cwd,
+				Meta:    map[string]string{"reason": "signal"},
+			})
+			hookCancel()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "⚠️  on_session_end hook error: %v\n", err)
+			}
+			for _, hr := range hookResults {
+				if hr.Err != nil {
+					fmt.Fprintf(os.Stderr, "⚠️  hook %q: %v\n", hr.Name, hr.Err)
+				}
+			}
+			_ = hookResults
+		}
+
 		os.Exit(130)
 	}()
 
@@ -304,7 +332,7 @@ func parseArgs() cliArgs {
 
 	// Check for subcommands first
 	switch os.Args[1] {
-	case "history", "session-history", "briefing", "cost", "init":
+	case "history", "session-history", "briefing", "cost", "init", "replay":
 		args.subcommand = os.Args[1]
 		if len(os.Args) > 2 {
 			args.subArgs = os.Args[2:]

@@ -125,6 +125,16 @@ func handleInit() {
 	workflowsDir := filepath.Join(configDir, "workflows")
 	os.MkdirAll(workflowsDir, 0755)
 
+	// Copy bundled workflow templates (won't overwrite existing ones)
+	copied, copyErr := copyWorkflowTemplates(workflowsDir)
+	if copyErr != nil {
+		fmt.Fprintf(os.Stderr, "   ⚠️  workflow template copy: %v\n", copyErr)
+	} else if copied > 0 {
+		fmt.Fprintf(os.Stderr, "   📋 %d workflow template(s) installed to %s\n", copied, workflowsDir)
+	} else {
+		fmt.Fprintf(os.Stderr, "   📋 workflow templates already present\n")
+	}
+
 	fmt.Printf("   ✅ config written to %s\n", configPath)
 	fmt.Println()
 	fmt.Println("🎉 Setup complete! Next steps:")
