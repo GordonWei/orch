@@ -113,14 +113,12 @@ func main() {
 		go func() {
 			if fn != nil {
 				fn()
-			} else {
-				// No shutdown hook registered (one-shot/subcommand mode
-				// never enters the REPL, so RegisterShutdown was never
-				// called) — give in-flight work a brief grace period,
-				// matching the previous unconditional behavior.
-				time.Sleep(500 * time.Millisecond)
+				close(done)
 			}
-			close(done)
+			// One-shot/subcommand mode (fn == nil): don't close done.
+			// The context cancellation propagates to in-flight work which
+			// will finish and let main() return naturally. Only a second
+			// Ctrl+C forces immediate exit via the select below.
 		}()
 
 		select {
