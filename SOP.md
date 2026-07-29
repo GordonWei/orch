@@ -27,6 +27,39 @@ Shows an ASCII tree with dependency arrows:
    └─ [step_3] Merge reports (agent: claude) ← depends on: step_1, step_2
 ```
 
+### Structured JSON Output (v0.19.0+, --dry-run fix in v0.19.1)
+
+```bash
+orch --json "check disk usage" | jq .success
+```
+
+Covers all three one-shot output paths (workflow / direct-chat / executor). Schema:
+
+```json
+{
+  "success": true,
+  "plan": { "task_summary": "...", "difficulty": "...", "category": "...", "steps": [...] },
+  "steps": [
+    { "step_id": "step_1", "description": "...", "agent": "...", "output": "...", "took_ms": 0, "success": true }
+  ],
+  "output": "...",
+  "took_ms": 0,
+  "error": ""
+}
+```
+
+`plan`/`steps` are both omitted (`omitempty`) when there's nothing to report — e.g. `plan` is absent on a planning failure, `steps` is absent on a dry-run (nothing executed) or a direct-chat answer (no step-level detail).
+
+Combine with `--dry-run` to preview the plan structurally without executing it — `orch --json --dry-run "<prompt>"` prints the same JSON shape with `steps` omitted and `output` empty:
+
+```bash
+orch --json --dry-run "deploy the app" | jq .plan.steps
+```
+
+**v0.19.1 fix**: before this, `--json --dry-run` silently ignored `--json` and printed the human `📋 Execution Plan (dry-run):` text to stdout instead — any script piping `--dry-run` output through `jq` got a parse error. If you're on `v0.19.0` or earlier, `--json --dry-run` is not usable; upgrade first.
+
+REPL mode always runs with `jsonOutput=false` — `--json` only applies to one-shot invocations.
+
 ### Managing Memory
 
 ```bash
@@ -307,6 +340,21 @@ Move `default: true` to the desired model, then restart MLX server:
 pkill -f "mlx_lm.server"
 orch "hello"   # auto-starts with new model (shows progress: ⏳ waiting... Ns)
 ```
+
+### Customizing Technical Keyword Detection (v0.19.0+)
+
+`router.Classify()` treats input containing any of these as a task, not chat — this is what stops e.g. "helm rollback" or "整理 log" from being misrouted to the local chat model. The ~80 built-in keywords (infra tools, dev tools, file/system terms, Chinese action verbs) live in `config.DefaultRouteRules()`; override entirely via config.yaml:
+
+```yaml
+route_rules:
+  tech_indicators:
+    - "kubectl"
+    - "terraform"
+    - "整理"
+    # ... your full replacement list
+```
+
+**This replaces the whole list, it doesn't merge with the built-in defaults** — if you only want to add one keyword, copy the full default list from `pkg/config/config.go`'s `defaultTechIndicators()` first. Leaving `tech_indicators` unset (or empty in your YAML) falls back to the built-in defaults via `mergeDefaultRouteRules()` — there's currently no way to configure an explicit "empty list" to fully disable this keyword override; the merge treats an empty list the same as "not configured."
 
 ### Using Ollama
 
