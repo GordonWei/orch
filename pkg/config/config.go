@@ -69,7 +69,8 @@ type RouteRulesConfig struct {
 	// without also catching short task references like "那讀交接". Set to 0 to
 	// disable entirely, or raise it back toward the old unconditional behavior
 	// (previously hardcoded at 10) if you want more short input to skip MLX.
-	ChatShortInputMaxLen int `yaml:"chat_short_input_max_len"`
+	ChatShortInputMaxLen int      `yaml:"chat_short_input_max_len"`
+	TechIndicators       []string `yaml:"tech_indicators"`
 }
 
 type Config struct {
@@ -255,6 +256,11 @@ func mergeDefaultRouteRules(cfg *Config) {
 			cfg.RouteRules.Rules = append(cfg.RouteRules.Rules, def)
 		}
 	}
+
+	// Preserve default tech_indicators if user didn't override
+	if len(cfg.RouteRules.TechIndicators) == 0 {
+		cfg.RouteRules.TechIndicators = DefaultRouteRules().TechIndicators
+	}
 }
 
 // ActiveModel returns the default model definition.
@@ -414,6 +420,34 @@ func DefaultHighRiskPatterns() []string {
 	}
 }
 
+// defaultTechIndicators returns the built-in technical keyword list used by
+// router.Classify() to override chat detection. Users can override this
+// entirely via config.yaml route_rules.tech_indicators.
+func defaultTechIndicators() []string {
+	return []string{
+		// Infrastructure & cloud
+		"kubectl", "helm", "terraform", "aws", "gcloud", "docker", "k8s", "kubernetes",
+		"gke", "eks", "ecs", "s3", "ec2", "lambda", "cloudformation", "sam ",
+		"cloud run", "bigquery", "vpc", "subnet", "firewall", "load balancer",
+		"ingress", "gateway", "metallb", "rke2", "pod", "deploy", "namespace",
+		"node", "cluster", "service", "service mesh", "istio", "envoy",
+		// Code & dev tools
+		"git", "npm", "pnpm", "yarn", "make", "cargo", "pip", "go build", "go test",
+		"compile", "build", "test", "debug", "lint", "refactor",
+		"function", "class", "struct", "interface", "endpoint", "api",
+		// Files & system
+		"file", "directory", "folder", "path", "config", "yaml", "json", "log",
+		"error", "fix", "bug", "issue", "merge", "branch",
+		// Specific tools
+		"notion", "slack", "jira", "confluence",
+		"litellm", "backstage", "grafana", "prometheus",
+		// Action verbs that indicate work
+		"整理", "部署", "同步", "查詢", "分析", "修正", "更新", "刪除", "建立",
+		"設定", "檢查", "監控", "備份", "還原", "執行", "啟動", "停止",
+		"plan", "apply",
+	}
+}
+
 // DefaultRouteRules returns the full set of routing rules migrated from
 // route_hint.go (phrase + keyword rules) and classifyInputType (cli + chat rules).
 // Exported for use by tests that need a hermetic fixture (no file system access).
@@ -426,6 +460,7 @@ func DefaultRouteRules() RouteRulesConfig {
 		// short task references like "那讀交接" (4 runes) or "繼續" (2 runes) —
 		// see router.Classify() for the full rationale.
 		ChatShortInputMaxLen: 1,
+		TechIndicators:       defaultTechIndicators(),
 		Rules: []RouteRule{
 			// ══════════════════════════════════════════════════════════════
 			// PHRASE RULES (type="phrase") — multi-word patterns, checked first

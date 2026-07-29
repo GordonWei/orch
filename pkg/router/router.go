@@ -88,29 +88,9 @@ func (r *Router) Classify(input string) InputClass {
 
 	// Step 2: Technical keywords → it's a task, not chat.
 	// These override chat detection when present.
-	techIndicators := []string{
-		// Infrastructure & cloud
-		"kubectl", "helm", "terraform", "aws", "gcloud", "docker", "k8s", "kubernetes",
-		"gke", "eks", "ecs", "s3", "ec2", "lambda", "cloudformation", "sam ",
-		"cloud run", "bigquery", "vpc", "subnet", "firewall", "load balancer",
-		"ingress", "gateway", "metallb", "rke2", "pod", "deploy", "namespace",
-		"node", "cluster", "service", "service mesh", "istio", "envoy",
-		// Code & dev tools
-		"git", "npm", "pnpm", "yarn", "make", "cargo", "pip", "go build", "go test",
-		"compile", "build", "test", "debug", "lint", "refactor",
-		"function", "class", "struct", "interface", "endpoint", "api",
-		// Files & system
-		"file", "directory", "folder", "path", "config", "yaml", "json", "log",
-		"error", "fix", "bug", "issue", "merge", "branch",
-		// Specific tools
-		"notion", "slack", "jira", "confluence",
-		"litellm", "backstage", "grafana", "prometheus",
-		// Action verbs that indicate work
-		"整理", "部署", "同步", "查詢", "分析", "修正", "更新", "刪除", "建立",
-		"設定", "檢查", "監控", "備份", "還原", "執行", "啟動", "停止",
-		"plan", "apply",
-	}
-	for _, kw := range techIndicators {
+	// Reads from config (route_rules.tech_indicators) — users can customise
+	// what counts as a "technical task" without touching code.
+	for _, kw := range r.cfg.TechIndicators {
 		if strings.Contains(lower, kw) {
 			return ClassNaturalLanguage
 		}

@@ -322,7 +322,7 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br
 			enrichedInput = prefix.String()
 		}
 
-		_, output := runTask(nil, reg, cfg, store, br, apiBackends, bus, enrichedInput, false)
+		_, output := runTask(nil, reg, cfg, store, br, apiBackends, bus, enrichedInput, false, false)
 		replSession.add(input, output)
 		fmt.Fprintln(os.Stderr)
 	}

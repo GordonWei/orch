@@ -285,7 +285,7 @@ func main() {
 		}
 
 		// runTask prints the output itself; the returned string is only for REPL session context.
-		ok, _ := runTask(ctx, reg, cfg, store, br, apiBackends, bus, prompt, args.dryRun)
+		ok, _ := runTask(ctx, reg, cfg, store, br, apiBackends, bus, prompt, args.dryRun, args.jsonOutput)
 		if !ok {
 			os.Exit(1)
 		}
@@ -315,6 +315,7 @@ type cliArgs struct {
 	showTools   bool
 	showVersion bool
 	dryRun      bool
+	jsonOutput  bool   // --json flag
 	verbose     bool
 	backend     string // --backend override
 	subcommand  string
@@ -346,6 +347,8 @@ func parseArgs() cliArgs {
 			args.showTools = true
 		case "--dry-run":
 			args.dryRun = true
+		case "--json":
+			args.jsonOutput = true
 		case "--verbose":
 			args.verbose = true
 		case "--version", "-v":
@@ -375,6 +378,7 @@ Usage:
   orch                       REPL mode: continuous interaction
   orch --tools               Show available tools
   orch --dry-run <prompt>    Plan only, don't execute
+  orch --json <prompt>       Output result as structured JSON to stdout
   orch --verbose <prompt>    Show detailed MLX debug output
   orch --backend <name>      Override AI backend (kiro/claude/gemini)
   orch --version             Show version

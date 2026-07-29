@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -22,7 +23,59 @@ import (
 
 // ===== Task Execution =====
 
-func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry, apiBackends map[string]apibackend.APIBackend, bus *eventbus.Bus, prompt string, dryRun bool) (bool, string) {
+// JSONOutput is the structured output format for --json mode.
+type JSONOutput struct {
+	Success bool             `json:"success"`
+	Plan    *planner.Plan    `json:"plan,omitempty"`
+	Steps   []JSONStepResult `json:"steps,omitempty"`
+	Output  string           `json:"output"`
+	TookMs  int64            `json:"took_ms"`
+	Error   string           `json:"error,omitempty"`
+}
+
+// JSONStepResult is the per-step detail in JSON output.
+type JSONStepResult struct {
+	StepID      string `json:"step_id"`
+	Description string `json:"description"`
+	Agent       string `json:"agent"`
+	Output      string `json:"output"`
+	TookMs      int64  `json:"took_ms"`
+	Success     bool   `json:"success"`
+	Error       string `json:"error,omitempty"`
+}
+
+// emitJSON writes a JSONOutput to stdout with pretty-print indentation.
+func emitJSON(success bool, plan *planner.Plan, result *executor.Result, output string, chatErr error) {
+	jout := JSONOutput{
+		Success: success,
+		Plan:    plan,
+		Output:  output,
+	}
+	if result != nil {
+		jout.TookMs = result.Took.Milliseconds()
+		if result.Err != nil {
+			jout.Error = result.Err.Error()
+		}
+		for _, sr := range result.Steps {
+			jsr := JSONStepResult{
+				StepID: sr.StepID, Description: sr.Description, Agent: sr.Agent,
+				Output: sr.Output, TookMs: sr.Took.Milliseconds(), Success: sr.Err == nil,
+			}
+			if sr.Err != nil {
+				jsr.Error = sr.Err.Error()
+			}
+			jout.Steps = append(jout.Steps, jsr)
+		}
+	}
+	if chatErr != nil {
+		jout.Error = chatErr.Error()
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	enc.Encode(jout)
+}
+
+func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, store *memory.Store, br *backend.Registry, apiBackends map[string]apibackend.APIBackend, bus *eventbus.Bus, prompt string, dryRun bool, jsonOutput bool) (bool, string) {
 	// 0. Workflow trigger match — check before AI planning
 	if workflows, err := workflow.LoadAll(cfg.Workflows.Dir); err == nil && len(workflows) > 0 {
 		if matched := workflow.Match(prompt, workflows); matched != nil {
@@ -63,7 +116,7 @@ func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, st
 				fmt.Fprintf(os.Stderr, "🏁 workflow complete (%s)\n", result.Took.Round(100*time.Millisecond))
 				if len(result.Steps) > 0 {
 					last := result.Steps[len(result.Steps)-1]
-					if last.Output != "" {
+					if !jsonOutput && last.Output != "" {
 						fmt.Print(last.Output)
 					}
 				}
@@ -91,11 +144,19 @@ func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, st
 			}
 
 			if !result.Success {
+				if jsonOutput {
+					wfPlan := &planner.Plan{TaskSummary: matched.Name, Category: "workflow", Difficulty: "workflow", Steps: plan.Steps}
+					emitJSON(false, wfPlan, &result, "", nil)
+				}
 				return false, ""
 			}
 			var finalOutput string
 			if len(result.Steps) > 0 {
 				finalOutput = result.Steps[len(result.Steps)-1].Output
+			}
+			if jsonOutput {
+				wfPlan := &planner.Plan{TaskSummary: matched.Name, Category: "workflow", Difficulty: "workflow", Steps: plan.Steps}
+				emitJSON(true, wfPlan, &result, finalOutput, nil)
 			}
 			return true, finalOutput
 		}
@@ -114,6 +175,9 @@ func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, st
 	plan, err := p.GeneratePlan(prompt)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ planning failed: %v\n", err)
+		if jsonOutput {
+			emitJSON(false, nil, nil, "", err)
+		}
 		return false, ""
 	}
 
@@ -138,7 +202,11 @@ func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, st
 			fmt.Fprintf(os.Stderr, "   ⚠️  local chat failed: %v, falling back to executor\n", err)
 		} else {
 			fmt.Fprintf(os.Stderr, "\n")
-			fmt.Println(answer)
+			if jsonOutput {
+				emitJSON(true, plan, nil, answer, nil)
+			} else {
+				fmt.Println(answer)
+			}
 			if store != nil {
 				store.AddHistory(memory.HistoryEntry{
 					Input:         prompt,
@@ -216,7 +284,7 @@ func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, st
 		fmt.Fprintf(os.Stderr, "🏁 complete (%s)\n", result.Took.Round(100*time.Millisecond))
 		if len(result.Steps) > 0 {
 			last := result.Steps[len(result.Steps)-1]
-			if last.Output != "" {
+			if !jsonOutput && last.Output != "" {
 				fmt.Print(last.Output)
 			}
 		}
@@ -261,6 +329,9 @@ func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, st
 	}
 
 	if !result.Success {
+		if jsonOutput {
+			emitJSON(false, plan, &result, "", nil)
+		}
 		return false, ""
 	}
 
@@ -364,7 +435,7 @@ func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, st
 					}
 				} else {
 					fmt.Fprintf(os.Stderr, "   ✅ chain complete\n")
-					if chainOutput != "" {
+					if !jsonOutput && chainOutput != "" {
 						fmt.Print(chainOutput)
 					}
 					if store != nil {
@@ -388,6 +459,9 @@ func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, st
 	if len(result.Steps) > 0 {
 		last := result.Steps[len(result.Steps)-1]
 		finalOutput = last.Output
+	}
+	if jsonOutput {
+		emitJSON(true, plan, &result, finalOutput, nil)
 	}
 	return true, finalOutput
 }
