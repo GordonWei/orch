@@ -531,6 +531,10 @@ npm install -g @anthropic-ai/gemini  # or: brew install gemini
 
 ## Changelog
 
+### v0.19.2 (2026-07-29)
+
+**Docs-only, no behavior change.** SOP.md never got usage docs for `--json` or `tech_indicators` when they shipped in v0.19.0 — added a "Structured JSON Output" section (schema, `omitempty` fields, the `--dry-run` combination, and a callout that it didn't work until the v0.19.1 fix) and a "Customizing Technical Keyword Detection" section (override syntax, and that it replaces the default list wholesale rather than merging).
+
 ### v0.19.1 (2026-07-29)
 
 **Two bugs found reviewing v0.19.0's `--json` mode before it shipped — one confined to `--json`, the other a pre-existing text-mode bug the review dug up along the way.**
