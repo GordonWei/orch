@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -143,7 +144,21 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br
 				continue
 			}
 			if err != nil {
-				break
+				// Distinguish real EOF (user pressed Ctrl+D) from spurious
+				// EOF caused by macOS App Nap suspending the terminal's PTY.
+				// On spurious EOF, stdin recovers after a short delay — retry
+				// once before giving up.
+				if err == io.EOF {
+					time.Sleep(200 * time.Millisecond)
+					line, err = rl.Readline()
+					if err == nil {
+						// Recovered — proceed with the line we just read.
+					} else {
+						break
+					}
+				} else {
+					break
+				}
 			}
 		}
 		input := strings.TrimSpace(line)
