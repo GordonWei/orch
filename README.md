@@ -531,6 +531,29 @@ npm install -g @anthropic-ai/gemini  # or: brew install gemini
 
 ## Changelog
 
+### v0.19.1 (2026-07-29)
+
+**Two bugs found reviewing v0.19.0's `--json` mode before it shipped — one confined to `--json`, the other a pre-existing text-mode bug the review dug up along the way.**
+
+- **🔴 Fixed: `--json` combined with `--dry-run` silently fell back to plain text.** Both dry-run branches called `printDryRun(plan)` unconditionally regardless of `jsonOutput`, so `orch --json --dry-run "<prompt>"` handed a script human-formatted stdout instead of JSON — breaking the one combination (preview a plan structurally without executing it) a scripted caller is most likely to want. New `emitDryRunPlan()` picks the right renderer based on `jsonOutput`.
+- **🔴 Fixed (predates v0.19.0, not caused by it): a re-plan that *succeeded* was still reported as a failure**, in both text and `--json` mode. `executor.Execute()`'s own return value, when a step's `on_failure: re-plan` fires, is a documented sentinel (`Success:false, Err:"re-plan triggered"`, see `TestOnFailureRePlan`) — the real outcome only exists in whatever `SetRePlanFunc`'s closure recorded via its own nested `e.Execute(newPlan)` call. `result = e.Execute(plan)` unconditionally clobbered that closure-recorded outcome with the sentinel every time. New `mergeReplanResult()` only takes the outer return value when it isn't that sentinel; the closure now also syncs the outer `plan` variable to whatever actually ran, so `--json`'s `plan`/`steps` fields (and history's `agent` field) describe the same execution instead of the original, failed one.
+- New tests: `TestEmitDryRunPlan_JSONMode`/`_TextMode`, `TestMergeReplanResult`, `TestReplanEndToEnd` (drives the real executor with real shell steps end-to-end, no mocks — reproduces the exact re-plan clobbering bug and locks in the fix).
+- `go build` / `go vet` / `go test -race -count=1 ./...` all green (16 packages).
+
+### v0.19.0 (2026-07-29)
+
+**Two near-term roadmap features.**
+
+- **`route_rules.tech_indicators`** — the ~80 hardcoded technical keywords in `router.Classify()` moved from `router.go` into `config.RouteRulesConfig`. Users can override what counts as a "technical task" via `config.yaml`; unset falls back to the built-in defaults through `mergeDefaultRouteRules()`.
+- **`orch --json <prompt>`** — structured JSON output for one-shot mode, covering all three output paths (workflow / direct-chat / executor): `JSONOutput`/`JSONStepResult` structs carry plan, steps, timing, and error detail. REPL mode always passes `jsonOutput=false`.
+- `go build` / `go vet` / `go test -race -count=1 ./...` all green (15 packages) — though see v0.19.1 directly above: this feature shipped with zero test coverage of its own, and two real bugs (`--json --dry-run`, re-plan result clobbering) slipped through as a result.
+
+### v0.18.2 (2026-07-29)
+
+**Fixed a macOS-specific REPL exit bug.**
+
+- **🔴 Fixed:** when iTerm2 is backgrounded, macOS App Nap can suspend the terminal's PTY, causing `Readline()` to receive a spurious `io.EOF` — previously this broke out of the REPL loop immediately, printing `bye` without the user having typed anything. Now retries once after a 200ms grace period; a real Ctrl+D still exits since the retry also returns EOF.
+
 ### v0.18.0 (2026-07-26)
 
 **Four new capabilities from Kiro, reviewed and one wording fix applied before shipping.**

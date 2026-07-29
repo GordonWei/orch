@@ -44,6 +44,39 @@ type JSONStepResult struct {
 	Error       string `json:"error,omitempty"`
 }
 
+// emitDryRunPlan reports a dry-run plan either as human-readable text (the
+// existing printDryRun) or, in --json mode, as structured JSON on stdout.
+// Without this, --json --dry-run silently fell back to printDryRun's plain
+// text, breaking the JSON contract for the one case (preview a plan without
+// executing it) a scripted caller is most likely to want.
+func emitDryRunPlan(plan *planner.Plan, jsonOutput bool) {
+	if jsonOutput {
+		emitJSON(true, plan, nil, "", nil)
+		return
+	}
+	printDryRun(plan)
+}
+
+// mergeReplanResult decides whether result should be replaced by next, the
+// return value of e.Execute(plan).
+//
+// executor.Execute() has a documented dual contract (see executor_test.go's
+// TestOnFailureRePlan): when a step's on_failure=re-plan fires, its OWN return
+// value is a sentinel (Success:false, Err:"re-plan triggered", RePlanCount:1)
+// — it is NOT the outcome of the re-plan. The real outcome is whatever the
+// SetRePlanFunc closure produced via its own nested e.Execute(newPlan) call
+// and stored directly into the shared `result` variable. Blindly doing
+// `result = e.Execute(plan)` clobbers that closure-recorded outcome with the
+// sentinel every time — so a re-plan that *succeeds* still gets reported to
+// the user (and to --json consumers) as "💀 task failed ... re-plan
+// triggered". Only take `next` when it isn't that sentinel.
+func mergeReplanResult(result, next executor.Result) executor.Result {
+	if next.RePlanCount > 0 {
+		return result
+	}
+	return next
+}
+
 // emitJSON writes a JSONOutput to stdout with pretty-print indentation.
 func emitJSON(success bool, plan *planner.Plan, result *executor.Result, output string, chatErr error) {
 	jout := JSONOutput{
@@ -87,7 +120,7 @@ func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, st
 				fmt.Fprintf(os.Stderr, "   difficulty: %s | category: %s | steps: %d\n",
 					plan.Difficulty, plan.Category, len(plan.Steps))
 				fmt.Fprintf(os.Stderr, "\n")
-				printDryRun(plan)
+				emitDryRunPlan(plan, jsonOutput)
 				return true, ""
 			}
 
@@ -187,7 +220,7 @@ func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, st
 
 	if dryRun {
 		fmt.Fprintf(os.Stderr, "\n")
-		printDryRun(plan)
+		emitDryRunPlan(plan, jsonOutput)
 		return true, ""
 	}
 
@@ -263,12 +296,16 @@ func runTask(ctx context.Context, reg *registry.Registry, cfg *config.Config, st
 		newStepWg := startEventPrinter(newStepEvents)
 		e.EventChan = newStepEvents
 
+		// Keep `plan` in sync with what actually ran, so history/--json output
+		// (both keyed off `plan`, not just `result`) describe the re-planned
+		// attempt instead of the original, failed one.
+		plan = newPlan
 		result = e.Execute(newPlan)
 		newStepWg.Wait()
 		return nil
 	})
 
-	result = e.Execute(plan)
+	result = mergeReplanResult(result, e.Execute(plan))
 
 	stepPrinterWg.Wait()
 	close(outputEvents)
