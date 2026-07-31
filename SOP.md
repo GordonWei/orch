@@ -513,6 +513,14 @@ If a session (especially claude/kiro rendering a spinner or full-screen UI) stop
 - If you're on an older build: `/kill` the session and `/session <backend>` again
 - Confirm your build includes the fix: `git log --oneline -1` should be at or after `v0.10.1`
 
+### REPL appears frozen after backgrounding the terminal (v0.19.3)
+
+If you switch away to another window mid-session and come back to a REPL that doesn't respond to any key (including Ctrl+C/D):
+- v0.19.3 added a `SIGCONT` listener that calls `Terminal.KickRead()` on resume, in case the terminal's read loop got stuck waiting on a kick that never came
+- **This is a safety net, not a confirmed fix** — whether macOS App Nap actually delivers `SIGCONT` to a backgrounded PTY child process at all hasn't been verified; App Nap's usual mechanism is CPU/timer throttling, not job-control signals
+- Run with `orch --verbose` to log `[sigcont] received...` when the handler fires — if you hit this freeze again and don't see that line, the SIGCONT theory is wrong and the real cause is still open
+- Do NOT try to "fix" this further by adding `ExitRawMode()`/`EnterRawMode()` calls to the SIGCONT handler — that was the original approach and `go build -race` confirmed it races with readline's own Ctrl+Z/`fg` handling (`Terminal.SleepToResume()`), both touching the unsynchronized `RawMode.state` field in `chzyer/readline`. See v0.19.3 changelog entry for the reproduction.
+
 ### Route hints not appearing
 
 Route hints only trigger when:

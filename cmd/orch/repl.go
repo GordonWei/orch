@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/chzyer/readline"
@@ -41,6 +43,38 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br
 		return
 	}
 	defer rl.Close()
+
+	// Nudge readline's ioloop after resuming from a background suspend
+	// (Ctrl+Z/SIGTSTP + `fg`, or possibly macOS App Nap suspending a
+	// backgrounded PTY — the latter is UNVERIFIED: App Nap's usual mechanism
+	// is timer/CPU throttling, not POSIX job-control signals, so it's unclear
+	// this handler ever fires for that case). Deliberately KickRead() only —
+	// NOT ExitRawMode()/EnterRawMode(). Those wrap readline's internal
+	// RawMode.state field (utils.go), which has no mutex; a standalone
+	// reproduction confirmed go test -race catches a real data race there
+	// when this handler races with readline's own Ctrl+Z path
+	// (Terminal.SleepToResume, which already handles resume via a
+	// ticker-based heuristic — no signal handling needed on that path).
+	// KickRead() only touches the buffered kickChan, so it's safe to call
+	// from any goroutine at any time. --verbose logs each firing so a real
+	// occurrence tells us whether this path ever actually engages.
+	sigContCh := make(chan os.Signal, 1)
+	signal.Notify(sigContCh, syscall.SIGCONT)
+	sigContDone := make(chan struct{})
+	go func() {
+		defer close(sigContDone)
+		for range sigContCh {
+			if verbose {
+				fmt.Fprintf(os.Stderr, "\n[sigcont] received at %s, kicking ioloop\n", time.Now().Format(time.RFC3339))
+			}
+			rl.Terminal.KickRead()
+		}
+	}()
+	defer func() {
+		signal.Stop(sigContCh)
+		close(sigContCh)
+		<-sigContDone
+	}()
 
 	// Create router instance for route hints and auto-routing
 	rt := router.New(cfg.RouteRules)
