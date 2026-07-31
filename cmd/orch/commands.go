@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gordonwei/orch/pkg/config"
 	"github.com/gordonwei/orch/pkg/memory"
@@ -177,6 +178,13 @@ func generateBriefingFromFile(cfg *config.Config, store *memory.Store) (string, 
 		Endpoint: activeModel.Endpoint,
 		Model:    activeModel.Model,
 		Backend:  activeModel.Backend,
+		// Bounded well below the 60s default: this runs synchronously on every
+		// REPL boot. Available() only checks a lightweight GET /v1/models, which
+		// stays responsive even when the server's generation path is wedged
+		// (observed 2026-07-31: server up 12 days, RSS collapsed to 28MB, /v1/models
+		// still 200 but /v1/chat/completions never returned) — so a hung server
+		// wasn't caught here and instead silently blocked startup for the full 60s.
+		Timeout: 20 * time.Second,
 	})
 	if !llmClient.Available() {
 		return "", fmt.Errorf("local model unavailable, cannot summarize %s", path)

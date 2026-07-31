@@ -233,6 +233,12 @@ func main() {
 			// the way a manually-triggered `orch briefing gen` does. Falls back
 			// to the last cached briefing (if any) on any failure (file missing,
 			// MLX down) instead of blocking startup.
+			//
+			// This call blocks the REPL boot (it runs before runREPL, so before
+			// the SIGCONT handler even exists) with no other output in between —
+			// print progress so a slow/wedged local model reads as "generating
+			// briefing" instead of a silent freeze.
+			fmt.Fprintf(os.Stderr, "⏳ generating briefing from %s...\n", cfg.Memory.BriefingSourceFile)
 			if fresh, genErr := generateBriefingFromFile(cfg, store); genErr == nil {
 				brief, t, err = fresh, time.Now(), nil
 			} else if verbose {

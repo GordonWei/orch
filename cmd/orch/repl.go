@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -151,6 +152,7 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br
 
 	var pendingInput string
 
+replLoop:
 	for {
 		// Update prompt based on session mode
 		if sm.HasActive() {
@@ -182,13 +184,32 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br
 				// EOF caused by macOS App Nap suspending the terminal's PTY.
 				// On spurious EOF, stdin recovers after a short delay — retry
 				// once before giving up.
+				//
+				// The retry itself must be bounded. Confirmed via a live
+				// goroutine dump (2026-07-31, SIGQUIT on a hung session):
+				// chzyer/readline's internal Operation.ioloop() goroutine —
+				// the one that assembles keystrokes into a line and only
+				// runs once for the life of the Instance, with no restart
+				// path — can exit permanently on an EOF read. When that
+				// happens, this retry's rl.Readline() call blocks forever
+				// on a channel nothing will ever send to again: worse than
+				// the pre-retry behavior (which just exited on EOF), because
+				// it hangs with zero output instead of failing visibly. If
+				// the retry doesn't return within a few seconds, treat it as
+				// unrecoverable and exit the REPL loop cleanly rather than
+				// hang silently.
 				if err == io.EOF {
 					time.Sleep(200 * time.Millisecond)
-					line, err = rl.Readline()
-					if err == nil {
+					retryLine, retryErr := callReadlineWithTimeout(rl.Readline, 3*time.Second)
+					switch {
+					case retryErr == nil:
+						line = retryLine
 						// Recovered — proceed with the line we just read.
-					} else {
-						break
+					case errors.Is(retryErr, errReadlineTimeout):
+						fmt.Fprintf(os.Stderr, "\n⚠️  readline stopped responding after an EOF and didn't recover within 3s — exiting this session (start a new orch to continue)\n")
+						break replLoop
+					default:
+						break replLoop
 					}
 				} else {
 					break
@@ -379,6 +400,44 @@ func runREPL(reg *registry.Registry, cfg *config.Config, store *memory.Store, br
 	}
 
 	fmt.Fprintln(os.Stderr, "👋 bye")
+}
+
+// errReadlineTimeout is returned by callReadlineWithTimeout when readFn
+// doesn't return within the given bound.
+var errReadlineTimeout = errors.New("readline call timed out")
+
+// callReadlineWithTimeout runs readFn (in practice, rl.Readline) and returns
+// errReadlineTimeout if it doesn't complete within timeout, instead of
+// blocking forever.
+//
+// This matters because chzyer/readline's internal Operation.ioloop() — the
+// goroutine that assembles keystrokes into a line — runs once for the life
+// of the Instance with no restart path. Confirmed via a live goroutine dump
+// (2026-07-31, SIGQUIT on a hung session) that it can exit permanently on an
+// EOF read; when that happens, rl.Readline() blocks forever on a channel
+// nothing will ever send to again. The EOF-retry in runREPL exists to
+// recover from a *transient* spurious EOF (macOS App Nap suspending the
+// PTY), but without this bound, hitting the permanent case instead turns a
+// clean exit into a silent, unrecoverable hang — worse than not retrying at
+// all.
+//
+// If readFn does time out, it keeps running in the background forever (there
+// is no way to cancel a blocked rl.Readline() call) — an acceptable leak
+// since this only fires on an already session-ending condition.
+func callReadlineWithTimeout(readFn func() (string, error), timeout time.Duration) (string, error) {
+	done := make(chan struct{})
+	var line string
+	var err error
+	go func() {
+		line, err = readFn()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return line, err
+	case <-time.After(timeout):
+		return "", errReadlineTimeout
+	}
 }
 
 // sessionContext maintains a sliding window of recent conversation turns.

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gordonwei/orch/pkg/config"
 	"github.com/gordonwei/orch/pkg/memory"
@@ -121,5 +122,60 @@ func TestGenerateBriefingFromFile_MLXUnavailable(t *testing.T) {
 	_, err := generateBriefingFromFile(cfg, store)
 	if err == nil {
 		t.Fatal("expected an error when the local model is unavailable, got nil")
+	}
+}
+
+// TestGenerateBriefingFromFile_ChatHangs is a regression test for a real
+// incident (2026-07-31): a local MLX server can end up wedged such that
+// GET /v1/models (used by Available()) still returns 200 promptly, but
+// POST /v1/chat/completions (the actual generation call) never responds.
+// Available() alone can't catch this, and since this call runs synchronously
+// on every REPL boot — before runREPL, so before any user-facing prompt or
+// input handling exists — an unbounded client made the whole REPL silently
+// hang for the full default 60s client timeout on every startup, which read
+// as a frozen terminal rather than a slow briefing. Asserts the call returns
+// well under 60s (bounded by the 20s Timeout set in generateBriefingFromFile)
+// once the server stops responding to the chat endpoint.
+func TestGenerateBriefingFromFile_ChatHangs(t *testing.T) {
+	// block must close before mlx.Close() runs, or Close() deadlocks waiting
+	// for the still-in-flight /v1/chat/completions handler to return. Defers
+	// run LIFO, so declare mlx.Close() first — it then runs *last*, after
+	// close(block) has already unblocked the handler.
+	block := make(chan struct{})
+	mlx := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			w.WriteHeader(http.StatusOK)
+		case "/v1/chat/completions":
+			<-block // never responds until the test unblocks it
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mlx.Close()
+	defer close(block)
+
+	sourceFile := filepath.Join(t.TempDir(), "handoff.md")
+	if err := os.WriteFile(sourceFile, []byte("# Handoff"), 0644); err != nil {
+		t.Fatalf("failed to write source file: %v", err)
+	}
+
+	cfg := &config.Config{
+		Models: []config.ModelDef{
+			{Name: "test", Backend: "mlx", Endpoint: mlx.URL, Model: "test-model", Default: true},
+		},
+		Memory: config.MemoryConfig{BriefingSourceFile: sourceFile},
+	}
+	store := newTestStore(t)
+
+	start := time.Now()
+	_, err := generateBriefingFromFile(cfg, store)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected an error when the chat endpoint never responds, got nil")
+	}
+	if elapsed >= 60*time.Second {
+		t.Errorf("generateBriefingFromFile took %v — did not honor a bounded timeout below the 60s http.Client default", elapsed)
 	}
 }
