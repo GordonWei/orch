@@ -531,6 +531,16 @@ npm install -g @anthropic-ai/gemini  # or: brew install gemini
 
 ## Changelog
 
+### v0.19.6 (2026-07-31)
+
+**v0.19.5's fix bounded the hang but exited on every recurrence — which is exactly the "orch says bye without user intent" behavior the original 2026-07-29 EOF-retry fix was written to prevent. This one actually recovers instead of giving up.**
+
+- Recurred same day, right after a normal `DirectChat()` response (a `chat`-category message like "介紹你自己") — not obviously tied to a window switch this time, so the App Nap correlation from the original report is looking less certain than assumed. `readline.Instance` (the `rl` variable) turns out to expose both `Terminal` and `Operation` as **public fields**: `Terminal` reads raw bytes off stdin (confirmed alive and healthy in the v0.19.5 goroutine dump even while the freeze was happening), `Operation` assembles those bytes into a line (the part that dies). `Terminal.Readline()` is the library's own public method for handing back a fresh `Operation` — starts a new internal `ioloop()` goroutine, bound to the *same* still-healthy `Terminal`.
+- **Fix**: when the bounded EOF-retry from v0.19.5 times out, instead of exiting immediately, rebuild just the dead half: `rl.Operation = rl.Terminal.Readline()`, then give the session one more bounded read attempt (5s) on the fresh `Operation` before giving up. Only exits if that also fails.
+- Left the exact trigger for the original EOF unresolved — this session's evidence (occurring right after a `DirectChat()` call, not obviously during backgrounding) weakens the App Nap theory further, but doesn't replace it with anything confirmed. The recovery mechanism doesn't depend on knowing the trigger, since it responds to the *symptom* (the bounded read never returning) rather than the cause.
+- Also cleaned up an unrelated, always-on debug line found while investigating (`[DIAG] response status=%d` in `planner.DirectChat`) — gated behind `--verbose` like every other debug line in this codebase, instead of printing on every single chat-category response.
+- Not covered by an automated test: recreating a dead `Operation.ioloop()` requires the exact library-internal failure this bug exhibits, which hasn't been reliably reproduced outside of live incidents — a targeted test would need to fake that condition rather than exercise the real path, so it wasn't added. `go build` / `go vet` / `go test -race -count=1 ./...` still green (16 packages, no new tests this round); verified manually via a live PTY harness that the normal boot → chat → prompt path still works end-to-end.
+
 ### v0.19.5 (2026-07-31)
 
 **A second, different cause of the same "frozen REPL" symptom — this one mid-session, not at boot. Found it with a live goroutine dump, not guessing.**

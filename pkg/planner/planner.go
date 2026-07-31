@@ -832,7 +832,9 @@ func (p *Planner) DirectChat(userInput string) (string, error) {
 		return "", fmt.Errorf("mlx server unreachable or timed out: %w", err)
 	}
 	defer resp.Body.Close()
-	fmt.Fprintf(os.Stderr, "[DIAG] response status=%d\n", resp.StatusCode)
+	if p.Verbose {
+		fmt.Fprintf(os.Stderr, "   🔍 DirectChat response status=%d\n", resp.StatusCode)
+	}
 
 	var result struct {
 		Choices []struct {

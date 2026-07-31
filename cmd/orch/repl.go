@@ -188,16 +188,23 @@ replLoop:
 				// The retry itself must be bounded. Confirmed via a live
 				// goroutine dump (2026-07-31, SIGQUIT on a hung session):
 				// chzyer/readline's internal Operation.ioloop() goroutine —
-				// the one that assembles keystrokes into a line and only
-				// runs once for the life of the Instance, with no restart
-				// path — can exit permanently on an EOF read. When that
-				// happens, this retry's rl.Readline() call blocks forever
-				// on a channel nothing will ever send to again: worse than
-				// the pre-retry behavior (which just exited on EOF), because
-				// it hangs with zero output instead of failing visibly. If
-				// the retry doesn't return within a few seconds, treat it as
-				// unrecoverable and exit the REPL loop cleanly rather than
-				// hang silently.
+				// the one that assembles keystrokes into a line — can exit
+				// permanently on an EOF read. A plain rl.Readline() retry
+				// blocks forever on a channel nothing will ever send to
+				// again, since that goroutine is gone for good.
+				//
+				// v0.19.5 just bounded that hang and exited cleanly on
+				// timeout — but that meant every recurrence auto-disconnected
+				// the session, which is exactly the "orch says bye without
+				// user intent" behavior 7bac4b1 was originally written to
+				// avoid. v0.19.6: readline.Instance splits Terminal (reads
+				// raw bytes off stdin — confirmed alive and healthy even
+				// when Operation dies, per the same dump) from Operation
+				// (assembles bytes into a line — the part that dies) as two
+				// public fields. So instead of giving up, rebuild just the
+				// dead Operation off the still-healthy Terminal
+				// (rl.Terminal.Readline() starts a fresh ioloop goroutine)
+				// and give the session one more chance before exiting.
 				if err == io.EOF {
 					time.Sleep(200 * time.Millisecond)
 					retryLine, retryErr := callReadlineWithTimeout(rl.Readline, 3*time.Second)
@@ -206,8 +213,15 @@ replLoop:
 						line = retryLine
 						// Recovered — proceed with the line we just read.
 					case errors.Is(retryErr, errReadlineTimeout):
-						fmt.Fprintf(os.Stderr, "\n⚠️  readline stopped responding after an EOF and didn't recover within 3s — exiting this session (start a new orch to continue)\n")
-						break replLoop
+						fmt.Fprintf(os.Stderr, "\n⚠️  readline stopped responding after an EOF — rebuilding the input reader...\n")
+						rl.Operation = rl.Terminal.Readline()
+						recoveredLine, recoverErr := callReadlineWithTimeout(rl.Readline, 5*time.Second)
+						if recoverErr != nil {
+							fmt.Fprintf(os.Stderr, "⚠️  still not responding after rebuilding — exiting this session (start a new orch to continue)\n")
+							break replLoop
+						}
+						line = recoveredLine
+						// Recovered via a fresh Operation.
 					default:
 						break replLoop
 					}
