@@ -41,7 +41,7 @@ func NewStarter(cfg StarterConfig) *ServerStarter {
 // EnsureRunning checks if the server is already running; if not, starts it.
 // Returns nil if server is ready, error if failed to start.
 func (s *ServerStarter) EnsureRunning(client LLM) error {
-	if client.Available() {
+	if isAvailableWithRetry(client) {
 		return nil
 	}
 
@@ -53,6 +53,32 @@ func (s *ServerStarter) EnsureRunning(client LLM) error {
 	default:
 		return fmt.Errorf("auto-start not supported for backend %q", s.backend)
 	}
+}
+
+// isAvailableWithRetry re-checks client.Available() a few times before
+// concluding the server is actually down. A single failed check isn't
+// reliable enough to decide to spawn a competing process: mlx_lm.server
+// handles requests one at a time, so a server that's busy (e.g. mid-generation
+// for another orch session) can make a single GET /v1/models fail or time
+// out even though it's perfectly healthy.
+//
+// Observed live (2026-08-01): this false negative repeatedly triggered
+// startMLX(), which spawns a redundant mlx_lm.server via the deprecated
+// `python -m mlx_lm.server` invocation — it crashes immediately on the port
+// already held by the real, healthy server, leaving a startup-crash zombie
+// process behind for no benefit every time it happened.
+func isAvailableWithRetry(client LLM) bool {
+	const attempts = 3
+	const delay = 300 * time.Millisecond
+	for i := 0; i < attempts; i++ {
+		if client.Available() {
+			return true
+		}
+		if i < attempts-1 {
+			time.Sleep(delay)
+		}
+	}
+	return false
 }
 
 func (s *ServerStarter) startMLX() error {

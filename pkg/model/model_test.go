@@ -231,6 +231,65 @@ func TestStarter_EnsureRunning_UnsupportedBackend(t *testing.T) {
 	}
 }
 
+// fakeLLM is a minimal LLM implementation for exercising EnsureRunning's
+// retry logic without a real HTTP server.
+type fakeLLM struct {
+	availableAfter int // Available() returns false until this many calls have been made
+	calls          int
+}
+
+func (f *fakeLLM) Chat(messages []Message, opts *ChatOptions) (string, error) { return "", nil }
+func (f *fakeLLM) Available() bool {
+	f.calls++
+	return f.calls > f.availableAfter
+}
+func (f *fakeLLM) ModelName() string { return "fake" }
+func (f *fakeLLM) Backend() string   { return "fake" }
+
+// TestStarter_EnsureRunning_RetriesTransientUnavailable is a regression test
+// for a real incident (2026-08-01): a single failed Available() check isn't
+// reliable enough to conclude the server is down. mlx_lm.server handles one
+// request at a time, so a busy-but-healthy server can fail one health check
+// — which used to make EnsureRunning spawn a competing mlx_lm.server via the
+// deprecated `python -m mlx_lm.server` invocation, crashing immediately on
+// the port the real, healthy server already holds. Verifies 2 transient
+// failures followed by a success are treated as "already running" (no-op),
+// not "start a new one".
+func TestStarter_EnsureRunning_RetriesTransientUnavailable(t *testing.T) {
+	client := &fakeLLM{availableAfter: 2}
+	starter := NewStarter(StarterConfig{
+		Backend:  "mlx",
+		Endpoint: "http://127.0.0.1:19876",
+		Model:    "ghost",
+	})
+
+	err := starter.EnsureRunning(client)
+	if err != nil {
+		t.Errorf("EnsureRunning should recover from transient Available() failures, got: %v", err)
+	}
+	if client.calls != 3 {
+		t.Errorf("expected exactly 3 Available() calls (2 failures + 1 success), got %d", client.calls)
+	}
+}
+
+// TestStarter_EnsureRunning_GivesUpAfterPersistentUnavailable verifies the
+// retry is bounded: if Available() never succeeds, EnsureRunning still
+// proceeds to attempt starting the server rather than retrying forever.
+func TestStarter_EnsureRunning_GivesUpAfterPersistentUnavailable(t *testing.T) {
+	client := &fakeLLM{availableAfter: 999} // never becomes available
+	starter := NewStarter(StarterConfig{
+		Backend:    "mlx",
+		Endpoint:   "http://127.0.0.1:19876",
+		Model:      "ghost",
+		PythonPath: "/nonexistent/path/to/python",
+	})
+
+	_ = starter.EnsureRunning(client) // startMLX fails on the bad python path; only the call count matters here
+	if client.calls != 3 {
+		t.Errorf("expected exactly 3 Available() attempts before giving up, got %d", client.calls)
+	}
+}
+
 // TestOpenAIClient_ServerError verifies Chat() handles non-200 responses.
 func TestOpenAIClient_ServerError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

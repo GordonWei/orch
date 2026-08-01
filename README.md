@@ -531,6 +531,15 @@ npm install -g @anthropic-ai/gemini  # or: brew install gemini
 
 ## Changelog
 
+### v0.19.7 (2026-08-01)
+
+**Fixed a recurring false negative in the local-model auto-start check that kept spawning (and immediately crashing) redundant `mlx_lm.server` processes.**
+
+- Observed repeatedly (2026-08-01) while testing the v0.19.6 recovery path: a perfectly healthy, already-running `mlx_lm.server` would occasionally still trigger `startMLX()`, spawning a second server via the deprecated `python -m mlx_lm.server` invocation. It crashes immediately (`Address already in use`) since the real server already holds the port, leaving a harmless-but-messy startup-crash zombie process behind. Happened three separate times across two days of testing — not a one-off fluke.
+- **Cause**: `EnsureRunning()` decided the server was down based on a single `client.Available()` call (one `GET /v1/models`). `mlx_lm.server` appears to handle one request at a time — if it's mid-generation for another `orch` session's chat/task request when the health check fires, that single GET can fail or time out even though the server is completely healthy otherwise.
+- **Fix**: `EnsureRunning()` now goes through `isAvailableWithRetry()` — up to 3 attempts, 300ms apart — before concluding the server is actually down and attempting to start a new one. A momentary busy-server blip now self-resolves within ~600ms instead of triggering a redundant spawn.
+- New tests: `TestStarter_EnsureRunning_RetriesTransientUnavailable` (2 failures then a success is treated as "already running") and `TestStarter_EnsureRunning_GivesUpAfterPersistentUnavailable` (confirms the retry is bounded — persistent unavailability still proceeds to the start path rather than retrying forever). `go build` / `go vet` / `go test -race -count=1 ./...` all green (16 packages).
+
 ### v0.19.6 (2026-07-31)
 
 **v0.19.5's fix bounded the hang but exited on every recurrence — which is exactly the "orch says bye without user intent" behavior the original 2026-07-29 EOF-retry fix was written to prevent. This one actually recovers instead of giving up.**
