@@ -169,7 +169,7 @@ replLoop:
 			pendingInput = ""
 		} else {
 			var err error
-			line, err = rl.Readline()
+			line, err = readlineWithRecovery(rl)
 			if err == readline.ErrInterrupt {
 				// Ctrl+C in session mode → back to normal
 				if sm.HasActive() {
@@ -179,55 +179,11 @@ replLoop:
 				}
 				continue
 			}
+			if err == errReadlineFatal {
+				break replLoop
+			}
 			if err != nil {
-				// Distinguish real EOF (user pressed Ctrl+D) from spurious
-				// EOF caused by macOS App Nap suspending the terminal's PTY.
-				// On spurious EOF, stdin recovers after a short delay — retry
-				// once before giving up.
-				//
-				// The retry itself must be bounded. Confirmed via a live
-				// goroutine dump (2026-07-31, SIGQUIT on a hung session):
-				// chzyer/readline's internal Operation.ioloop() goroutine —
-				// the one that assembles keystrokes into a line — can exit
-				// permanently on an EOF read. A plain rl.Readline() retry
-				// blocks forever on a channel nothing will ever send to
-				// again, since that goroutine is gone for good.
-				//
-				// v0.19.5 just bounded that hang and exited cleanly on
-				// timeout — but that meant every recurrence auto-disconnected
-				// the session, which is exactly the "orch says bye without
-				// user intent" behavior 7bac4b1 was originally written to
-				// avoid. v0.19.6: readline.Instance splits Terminal (reads
-				// raw bytes off stdin — confirmed alive and healthy even
-				// when Operation dies, per the same dump) from Operation
-				// (assembles bytes into a line — the part that dies) as two
-				// public fields. So instead of giving up, rebuild just the
-				// dead Operation off the still-healthy Terminal
-				// (rl.Terminal.Readline() starts a fresh ioloop goroutine)
-				// and give the session one more chance before exiting.
-				if err == io.EOF {
-					time.Sleep(200 * time.Millisecond)
-					retryLine, retryErr := callReadlineWithTimeout(rl.Readline, 3*time.Second)
-					switch {
-					case retryErr == nil:
-						line = retryLine
-						// Recovered — proceed with the line we just read.
-					case errors.Is(retryErr, errReadlineTimeout):
-						fmt.Fprintf(os.Stderr, "\n⚠️  readline stopped responding after an EOF — rebuilding the input reader...\n")
-						rl.Operation = rl.Terminal.Readline()
-						recoveredLine, recoverErr := callReadlineWithTimeout(rl.Readline, 5*time.Second)
-						if recoverErr != nil {
-							fmt.Fprintf(os.Stderr, "⚠️  still not responding after rebuilding — exiting this session (start a new orch to continue)\n")
-							break replLoop
-						}
-						line = recoveredLine
-						// Recovered via a fresh Operation.
-					default:
-						break replLoop
-					}
-				} else {
-					break
-				}
+				break
 			}
 		}
 		input := strings.TrimSpace(line)
@@ -414,6 +370,110 @@ replLoop:
 	}
 
 	fmt.Fprintln(os.Stderr, "👋 bye")
+}
+
+// errReadlineFatal signals that readlineWithRecovery exhausted all recovery
+// attempts and the REPL should exit.
+var errReadlineFatal = errors.New("readline unrecoverable")
+
+// readlineWithRecovery wraps rl.Readline() with a watchdog that detects when
+// chzyer/readline's internal Operation.ioloop() has silently died, leaving
+// rl.Readline() blocked forever on an unbuffered channel that nothing will
+// ever send to.
+//
+// Previous fix attempts (v0.19.5/v0.19.6) only handled the case where
+// rl.Readline() *returned* io.EOF — but the confirmed failure mode
+// (goroutine dump, 2026-07-31) is that once Operation.ioloop() exits, the
+// *next* rl.Readline() call never returns at all (no EOF, no error —
+// just permanent block). That code path was never reached by the old fix.
+//
+// This function uses callReadlineWithTimeout as a watchdog: if the user
+// hasn't typed anything for idleTimeout, we probe whether the readline
+// subsystem is still alive by sending a KickRead (which is a no-op if
+// ioloop is healthy, but doesn't unblock a dead one) and then checking
+// if we get a response within a short probe window. If not, we rebuild
+// the Operation and retry.
+//
+// The idle timeout is deliberately long (10 minutes) — this is NOT meant
+// to time out normal user thinking time. It's a watchdog for "ioloop died
+// and rl.Readline() will never return". Users who come back after >10min
+// of inactivity will see a brief "rebuilding..." message but orch stays
+// alive. The alternative — orch silently frozen forever — is far worse.
+func readlineWithRecovery(rl *readline.Instance) (string, error) {
+	const idleTimeout = 10 * time.Minute
+	const probeTimeout = 2 * time.Second
+	const maxRebuilds = 3
+
+	for attempt := 0; attempt <= maxRebuilds; attempt++ {
+		line, err := callReadlineWithTimeout(rl.Readline, idleTimeout)
+
+		switch {
+		case err == nil:
+			return line, nil
+
+		case errors.Is(err, errReadlineTimeout):
+			// Readline didn't return within idleTimeout. This is the
+			// suspected "dead ioloop" case. Try kicking it first —
+			// if the user just hasn't typed, KickRead + a short wait
+			// would let a healthy readline return.
+			rl.Terminal.KickRead()
+			probeLine, probeErr := callReadlineWithTimeout(rl.Readline, probeTimeout)
+			if probeErr == nil {
+				return probeLine, nil
+			}
+			if !errors.Is(probeErr, errReadlineTimeout) {
+				// Got an actual error (EOF, interrupt, etc.) — handle below
+				return handleReadlineError(rl, probeLine, probeErr)
+			}
+
+			// Still no response after kick — Operation is dead. Rebuild.
+			if attempt < maxRebuilds {
+				fmt.Fprintf(os.Stderr, "\n⚠️  input reader stopped responding — rebuilding... (attempt %d/%d)\n", attempt+1, maxRebuilds)
+				rl.Operation = rl.Terminal.Readline()
+				continue
+			}
+			// Exhausted retries
+			fmt.Fprintf(os.Stderr, "\n⚠️  input reader unrecoverable after %d rebuilds — exiting (start a new orch to continue)\n", maxRebuilds)
+			return "", errReadlineFatal
+
+		default:
+			// Actual readline error (EOF, ErrInterrupt, etc.)
+			return handleReadlineError(rl, line, err)
+		}
+	}
+	return "", errReadlineFatal
+}
+
+// handleReadlineError processes non-timeout errors from rl.Readline(),
+// including the EOF recovery logic (transient App Nap EOF vs permanent
+// Operation death).
+func handleReadlineError(rl *readline.Instance, line string, err error) (string, error) {
+	if err == readline.ErrInterrupt {
+		return line, err
+	}
+	if err == io.EOF {
+		// Transient EOF (App Nap) — wait briefly and retry
+		time.Sleep(200 * time.Millisecond)
+		retryLine, retryErr := callReadlineWithTimeout(rl.Readline, 3*time.Second)
+		if retryErr == nil {
+			return retryLine, nil
+		}
+		if errors.Is(retryErr, errReadlineTimeout) {
+			// EOF followed by hang — rebuild Operation
+			fmt.Fprintf(os.Stderr, "\n⚠️  readline stopped responding after an EOF — rebuilding the input reader...\n")
+			rl.Operation = rl.Terminal.Readline()
+			recoveredLine, recoverErr := callReadlineWithTimeout(rl.Readline, 5*time.Second)
+			if recoverErr != nil {
+				fmt.Fprintf(os.Stderr, "⚠️  still not responding after rebuilding — exiting this session (start a new orch to continue)\n")
+				return "", errReadlineFatal
+			}
+			return recoveredLine, nil
+		}
+		// Non-timeout error on retry — treat as real EOF (Ctrl+D)
+		return "", err
+	}
+	// Any other error — propagate for the caller to break the loop
+	return "", err
 }
 
 // errReadlineTimeout is returned by callReadlineWithTimeout when readFn
