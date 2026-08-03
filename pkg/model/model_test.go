@@ -174,11 +174,16 @@ func TestOpenAIClient_ChatError(t *testing.T) {
 
 // TestStarter_EnsureRunning_AlreadyRunning verifies EnsureRunning is a no-op when Available() is true.
 func TestStarter_EnsureRunning_AlreadyRunning(t *testing.T) {
-	// Create a mock server that responds to /v1/models
+	// Create a mock server that responds to /v1/models and /v1/chat/completions
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/models" {
 			w.WriteHeader(200)
 			w.Write([]byte(`{"data":[]}`))
+			return
+		}
+		if r.URL.Path == "/v1/chat/completions" {
+			w.WriteHeader(200)
+			w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
 			return
 		}
 		w.WriteHeader(404)
